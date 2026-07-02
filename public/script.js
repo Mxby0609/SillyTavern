@@ -231,7 +231,7 @@ import {
     getInstructStoppingSequences,
 } from './scripts/instruct-mode.js';
 import { initLocales, t } from './scripts/i18n.js';
-import { getFriendlyTokenizerName, getTokenCount, getTokenCountAsync, initTokenizers, saveTokenCache } from './scripts/tokenizers.js';
+import { getFriendlyTokenizerName, getTokenCount, getTokenCountAsync, initTokenizers, primeTokenCountsAsync, saveTokenCache, TOKEN_BATCH_CHUNK_INITIAL, TOKEN_BATCH_CHUNK_MAX } from './scripts/tokenizers.js';
 import {
     user_avatar,
     getUserAvatars,
@@ -4823,6 +4823,16 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     let tokenCount = await getMessagesTokenCount();
     let lastAddedIndex = 0;
 
+    // Batch-count the injections in one request so the loop below resolves
+    // token counts from cache instead of one request per item.
+    if (main_api != 'openai' && injectedIndices.length > 0) {
+        const injectedTexts = injectedIndices
+            .map(index => chat2[index])
+            .filter(item => typeof item === 'string')
+            .map(item => item.replace(/\r/gm, ''));
+        await primeTokenCountsAsync(injectedTexts);
+    }
+
     // Pre-allocate all injections first.
     // If it doesn't fit - user shot himself in the foot
     for (const index of injectedIndices) {
@@ -4847,6 +4857,8 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         }
     }
 
+    let primedUntil = 0;
+    let primeChunkSize = TOKEN_BATCH_CHUNK_INITIAL;
     for (let i = 0; i < chat2.length; i++) {
         // not needed for OAI prompting
         if (main_api == 'openai') {
@@ -4862,6 +4874,22 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
         if (typeof item !== 'string') {
             continue;
+        }
+
+        // Batch-count upcoming messages in growing chunks (one request per
+        // chunk) so the counting below resolves from cache.
+        if (i >= primedUntil) {
+            const chunkEnd = Math.min(chat2.length, i + primeChunkSize);
+            const chunkTexts = [];
+            for (let chunkIndex = i; chunkIndex < chunkEnd; chunkIndex++) {
+                if (arrMes[chunkIndex] !== undefined || typeof chat2[chunkIndex] !== 'string') {
+                    continue;
+                }
+                chunkTexts.push(chat2[chunkIndex].replace(/\r/gm, ''));
+            }
+            await primeTokenCountsAsync(chunkTexts);
+            primedUntil = chunkEnd;
+            primeChunkSize = Math.min(primeChunkSize * 2, TOKEN_BATCH_CHUNK_MAX);
         }
 
         tokenCount += await getTokenCountAsync(item.replace(/\r/gm, ''));
