@@ -4573,60 +4573,69 @@ async function getPersonaLore() {
 
 export async function getSortedEntries() {
     try {
-        const [
-            globalLore,
-            characterLore,
-            chatLore,
-            personaLore,
-        ] = await Promise.all([
-            getGlobalLore(),
-            getCharacterLore(),
-            getChatLore(),
-            getPersonaLore(),
-        ]);
-
-        await eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore });
-
-        let entries;
-
-        switch (Number(world_info_character_strategy)) {
-            case world_info_insertion_strategy.evenly:
-                entries = [...globalLore, ...characterLore].sort(sortFn);
-                break;
-            case world_info_insertion_strategy.character_first:
-                entries = [...characterLore.sort(sortFn), ...globalLore.sort(sortFn)];
-                break;
-            case world_info_insertion_strategy.global_first:
-                entries = [...globalLore.sort(sortFn), ...characterLore.sort(sortFn)];
-                break;
-            default:
-                console.error('[WI] Unknown WI insertion strategy:', world_info_character_strategy, 'defaulting to evenly');
-                entries = [...globalLore, ...characterLore].sort(sortFn);
-                break;
-        }
-
-        // Chat lore always goes first, then persona lore, then the rest
-        entries = [...chatLore.sort(sortFn), ...personaLore.sort(sortFn), ...entries];
-
-        // Calculate hash and parse decorators. Split maps to preserve old hashes.
-        entries = entries.map((entry) => {
-            const [decorators, content] = parseDecorators(entry.content || '');
-            return { ...entry, decorators, content };
-        }).map((entry) => {
-            const hash = getStringHash(JSON.stringify(entry));
-            return { ...entry, hash };
-        });
-
-        console.debug(`[WI] Found ${entries.length} world lore entries. Sorted by strategy`, Object.entries(world_info_insertion_strategy).find((x) => x[1] === world_info_character_strategy));
-
-        // Entries are already call-local here: the cache clones book data on every read,
-        // and the maps above build fresh entry objects on top of that. Callers may replace
-        // top-level fields, but must not mutate nested objects (keys, decorators, ...).
-        return entries;
+        const entries = await buildSortedEntries();
+        // Hand out call-local entry objects: the scan path replaces top-level fields
+        // (macro substitution writes entry.content) and that must never leak into
+        // shared data. Nested objects (keys, decorators, ...) must not be mutated.
+        return entries.map((entry) => ({ ...entry }));
     } catch (e) {
         console.error(e);
         return [];
     }
+}
+
+/**
+ * Loads all applicable lore books and builds the sorted list of their entries.
+ * @returns {Promise<object[]>} Freshly built sorted entries
+ */
+async function buildSortedEntries() {
+    const [
+        globalLore,
+        characterLore,
+        chatLore,
+        personaLore,
+    ] = await Promise.all([
+        getGlobalLore(),
+        getCharacterLore(),
+        getChatLore(),
+        getPersonaLore(),
+    ]);
+
+    await eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore });
+
+    let entries;
+
+    switch (Number(world_info_character_strategy)) {
+        case world_info_insertion_strategy.evenly:
+            entries = [...globalLore, ...characterLore].sort(sortFn);
+            break;
+        case world_info_insertion_strategy.character_first:
+            entries = [...characterLore.sort(sortFn), ...globalLore.sort(sortFn)];
+            break;
+        case world_info_insertion_strategy.global_first:
+            entries = [...globalLore.sort(sortFn), ...characterLore.sort(sortFn)];
+            break;
+        default:
+            console.error('[WI] Unknown WI insertion strategy:', world_info_character_strategy, 'defaulting to evenly');
+            entries = [...globalLore, ...characterLore].sort(sortFn);
+            break;
+    }
+
+    // Chat lore always goes first, then persona lore, then the rest
+    entries = [...chatLore.sort(sortFn), ...personaLore.sort(sortFn), ...entries];
+
+    // Calculate hash and parse decorators. Split maps to preserve old hashes.
+    entries = entries.map((entry) => {
+        const [decorators, content] = parseDecorators(entry.content || '');
+        return { ...entry, decorators, content };
+    }).map((entry) => {
+        const hash = getStringHash(JSON.stringify(entry));
+        return { ...entry, hash };
+    });
+
+    console.debug(`[WI] Found ${entries.length} world lore entries. Sorted by strategy`, Object.entries(world_info_insertion_strategy).find((x) => x[1] === world_info_character_strategy));
+
+    return entries;
 }
 
 
