@@ -7,6 +7,7 @@ import { getStringHash } from './utils.js';
 import { kai_flags, kai_settings } from './kai-settings.js';
 import { textgen_types, textgenerationwebui_settings as textgen_settings, getTextGenServer, getTextGenModel } from './textgen-settings.js';
 import { getCurrentDreamGenModelTokenizer, getCurrentOpenRouterModelTokenizer, openRouterModels } from './textgen-models.js';
+import { perfMark, perfMeasure } from './perf-metrics.js';
 export { BYTES_PER_TOKEN as CHARACTERS_PER_TOKEN_RATIO };
 
 export const BYTES_PER_TOKEN = 3.35;
@@ -181,7 +182,9 @@ async function loadTokenCache() {
 export async function saveTokenCache() {
     try {
         console.debug('Chat Completions: saving token cache');
+        perfMark('tokencache-save:start');
         await objectStore.setItem('tokenCache', tokenCache);
+        perfMeasure('tokencache-save', 'tokencache-save:start');
     } catch (e) {
         console.log('Chat Completions: unable to save token cache', e);
     }

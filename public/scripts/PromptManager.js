@@ -12,6 +12,7 @@ import { renderTemplateAsync } from './templates.js';
 import { Popup } from './popup.js';
 import { t } from './i18n.js';
 import { isMobile } from './RossAscends-mods.js';
+import { perfMark, perfMeasure } from './perf-metrics.js';
 
 function debouncePromise(func, delay) {
     let timeoutId;
@@ -869,25 +870,31 @@ class PromptManager {
             if (true === afterTryGenerate) {
                 // Executed during dry-run for determining context composition
                 this.profileStart('filling context');
+                perfMark('pm-dryrun:start');
                 this.tryGenerate().finally(async () => {
+                    perfMeasure('pm-dryrun', 'pm-dryrun:start');
                     this.profileEnd('filling context');
                     this.profileStart('render');
+                    perfMark('pm-render:start');
                     const scrollPosition = this.#getScrollPosition();
                     await this.renderPromptManager();
                     await this.renderPromptManagerListItems();
                     this.makeDraggable();
                     this.#setScrollPosition(scrollPosition);
                     this.profileEnd('render');
+                    perfMeasure('pm-render', 'pm-render:start');
                 });
             } else {
                 // Executed during live communication
                 this.profileStart('render');
+                perfMark('pm-render:start');
                 const scrollPosition = this.#getScrollPosition();
                 await this.renderPromptManager();
                 await this.renderPromptManagerListItems();
                 this.makeDraggable();
                 this.#setScrollPosition(scrollPosition);
                 this.profileEnd('render');
+                perfMeasure('pm-render', 'pm-render:start');
             }
         }).catch(() => {
             console.log('Timeout while waiting for send press to be false');
