@@ -44,7 +44,7 @@ Instrumented spans:
 | `gen-preflight` | Generate() from entry until request data ready | script.js |
 | `chat-render` | Full chat (re)render | script.js |
 | `chat-save` | Chat serialization + upload | script.js |
-| `tokencache-save` | Full token cache write to IndexedDB | tokenizers.js |
+| `tokencache-save` | Token cache write to IndexedDB (per-chat shards, idle-deferred) | tokenizers.js |
 | `stream-tick` | Accumulated per-tick streaming cost | script.js |
 
 ## 3. Scripted baseline
