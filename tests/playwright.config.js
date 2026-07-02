@@ -7,6 +7,6 @@ export default defineConfig({
         video: 'only-on-failure',
         screenshot: 'only-on-failure',
     },
-    workers: 4,
+    workers: 8,
     fullyParallel: true,
 });
