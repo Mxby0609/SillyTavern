@@ -197,7 +197,7 @@ const defaultGlobalScanData = Object.freeze({
 /**
  * Represents a scanning buffer for one evaluation of World Info.
  */
-class WorldInfoBuffer {
+export class WorldInfoBuffer {
     /**
      * @type {Map<string, object>} Map of entries that need to be activated no matter what
      */
@@ -234,6 +234,18 @@ class WorldInfoBuffer {
     #startDepth = 0;
 
     /**
+     * @type {Map<string, string>} Scan strings already built by `get`, keyed by their build inputs.
+     * Only lives for one scan, so it can never serve stale data.
+     */
+    #getCache = new Map();
+
+    /**
+     * @type {Map<string, string>} Lowercased versions of large scanned strings.
+     * Only lives for one scan, so it can never serve stale data.
+     */
+    #lowerCache = new Map();
+
+    /**
      * Initialize the buffer with the given messages.
      * @param {string[]} messages Array of messages to add to the buffer
      * @param {WIGlobalScanData} globalScanData Chat independent context to be scanned
@@ -268,7 +280,21 @@ class WorldInfoBuffer {
     */
     #transformString(str, entry) {
         const caseSensitive = entry.caseSensitive ?? world_info_case_sensitive;
-        return caseSensitive ? str : str.toLowerCase();
+        if (caseSensitive) {
+            return str;
+        }
+        // Lowercasing the scanned text is a hot path: it runs once per key per entry
+        // on a string that can span the whole scan depth. Short strings (keys) are
+        // cheaper to lowercase than to cache.
+        if (str.length < 1024) {
+            return str.toLowerCase();
+        }
+        let lowered = this.#lowerCache.get(str);
+        if (lowered === undefined) {
+            lowered = str.toLowerCase();
+            this.#lowerCache.set(str, lowered);
+        }
+        return lowered;
     }
 
     /**
@@ -291,6 +317,25 @@ class WorldInfoBuffer {
         if (depth > MAX_SCAN_DEPTH) {
             console.warn(`[WI] Invalid WI scan depth ${depth}. Truncating to ${MAX_SCAN_DEPTH}`);
             depth = MAX_SCAN_DEPTH;
+        }
+
+        // The result only depends on the inputs below, and entries share few distinct
+        // combinations, so identical scan strings are only built once per scan.
+        const includeRecurse = this.#recurseBuffer.length > 0 && scanState !== scan_state.MIN_ACTIVATIONS;
+        const cacheKey = [
+            depth,
+            Number(!!(entry.matchPersonaDescription && this.#globalScanData.personaDescription)),
+            Number(!!(entry.matchCharacterDescription && this.#globalScanData.characterDescription)),
+            Number(!!(entry.matchCharacterPersonality && this.#globalScanData.characterPersonality)),
+            Number(!!(entry.matchCharacterDepthPrompt && this.#globalScanData.characterDepthPrompt)),
+            Number(!!(entry.matchScenario && this.#globalScanData.scenario)),
+            Number(!!(entry.matchCreatorNotes && this.#globalScanData.creatorNotes)),
+            this.#injectBuffer.length,
+            includeRecurse ? this.#recurseBuffer.length : 0,
+        ].join('|');
+        const cachedResult = this.#getCache.get(cacheKey);
+        if (cachedResult !== undefined) {
+            return cachedResult;
         }
 
         const MATCHER = '\x01';
@@ -321,10 +366,11 @@ class WorldInfoBuffer {
         }
 
         // Min activations should not include the recursion buffer
-        if (this.#recurseBuffer.length > 0 && scanState !== scan_state.MIN_ACTIVATIONS) {
+        if (includeRecurse) {
             result += JOINER + this.#recurseBuffer.join(JOINER);
         }
 
+        this.#getCache.set(cacheKey, result);
         return result;
     }
 
@@ -337,7 +383,7 @@ class WorldInfoBuffer {
      */
     matchKeys(haystack, needle, entry) {
         // If the needle is a regex, we do regex pattern matching and override all the other options
-        const keyRegex = parseRegexFromString(needle);
+        const keyRegex = getScanKeyRegex(needle);
         if (keyRegex) {
             return keyRegex.test(haystack);
         }
@@ -353,8 +399,7 @@ class WorldInfoBuffer {
             if (keyWords.length > 1) {
                 return haystack.includes(transformedString);
             } else {
-                // Use custom boundaries to include punctuation and other non-alphanumeric characters
-                const regex = new RegExp(`(?:^|\\W)(${escapeRegex(transformedString)})(?:$|\\W)`);
+                const regex = getScanWholeWordRegex(transformedString);
                 if (regex.test(haystack)) {
                     return true;
                 }
@@ -2054,6 +2099,9 @@ export async function loadWorldInfo(name) {
 
     if (response.ok) {
         const data = await response.json();
+        // No memo invalidation needed here: a fetch only fills a book that is not in
+        // the cache, and a memo can only exist for books that were all cached when it
+        // was stored - leaving the cache (deleteWorldInfo) already invalidates it.
         worldInfoCache.set(name, data);
         return data;
     }
@@ -2846,6 +2894,54 @@ export function parseRegexFromString(input) {
     } catch (e) {
         return null;
     }
+}
+
+const MAX_SCAN_REGEX_CACHE = 1000;
+
+/** @type {Map<string, RegExp|null>} Cache of parsed slash-delimited key regexes for the scan loop */
+const scanKeyRegexCache = new Map();
+
+/** @type {Map<string, RegExp>} Cache of compiled whole-word key regexes for the scan loop */
+const scanWholeWordRegexCache = new Map();
+
+/**
+ * Cached version of `parseRegexFromString` for the scan loop.
+ * @param {string} needle - A delimited regex string
+ * @returns {RegExp|null} The regex object, or null if not a valid regex
+ */
+function getScanKeyRegex(needle) {
+    let regex = scanKeyRegexCache.get(needle);
+    if (regex === undefined) {
+        if (scanKeyRegexCache.size >= MAX_SCAN_REGEX_CACHE) {
+            scanKeyRegexCache.clear();
+        }
+        regex = parseRegexFromString(needle);
+        scanKeyRegexCache.set(needle, regex);
+    }
+    // Global/sticky regexes keep their lastIndex between test() calls.
+    // A freshly parsed regex always starts at 0, so reset to match that.
+    if (regex && (regex.global || regex.sticky)) {
+        regex.lastIndex = 0;
+    }
+    return regex;
+}
+
+/**
+ * Gets a cached whole-word matching regex for the given key.
+ * @param {string} transformedString - The key already transformed for case sensitivity
+ * @returns {RegExp} The compiled regex
+ */
+function getScanWholeWordRegex(transformedString) {
+    let regex = scanWholeWordRegexCache.get(transformedString);
+    if (regex === undefined) {
+        if (scanWholeWordRegexCache.size >= MAX_SCAN_REGEX_CACHE) {
+            scanWholeWordRegexCache.clear();
+        }
+        // Use custom boundaries to include punctuation and other non-alphanumeric characters
+        regex = new RegExp(`(?:^|\\W)(${escapeRegex(transformedString)})(?:$|\\W)`);
+        scanWholeWordRegexCache.set(transformedString, regex);
+    }
+    return regex;
 }
 
 /**
@@ -4104,6 +4200,7 @@ export async function saveWorldInfo(name, data, immediately = false) {
 
     // Update cache immediately, so any future call can pull from this
     worldInfoCache.set(name, data);
+    invalidateSortedEntriesMemo();
 
     if (immediately) {
         return await _save(name, data);
@@ -4251,6 +4348,7 @@ export async function deleteWorldInfo(worldInfoName) {
 
     if (worldInfoCache.has(worldInfoName)) {
         worldInfoCache.delete(worldInfoName);
+        invalidateSortedEntriesMemo();
     }
 
     const existingWorldIndex = selected_world_info.findIndex((e) => e === worldInfoName);
@@ -4478,60 +4576,142 @@ async function getPersonaLore() {
     return entries;
 }
 
+/**
+ * Monotonic version of the world info book cache. Bumped whenever cached book
+ * data changes, so memoized sorted entries can never survive a book change.
+ */
+let worldInfoBooksVersion = 0;
+
+/** @type {{key: string, entries: object[]}|null} Memoized result of buildSortedEntries */
+let sortedEntriesMemo = null;
+
+/**
+ * Invalidates the memoized sorted entries after a book change.
+ */
+function invalidateSortedEntriesMemo() {
+    worldInfoBooksVersion++;
+    sortedEntriesMemo = null;
+}
+
+/**
+ * Builds a key of everything that determines the result of buildSortedEntries:
+ * the book cache version, the insertion strategy, and the applicable book names
+ * in resolution order. Any change in these produces a different key.
+ * @returns {string} The memo key
+ */
+function getSortedEntriesMemoKey() {
+    const fileName = getCharaFilename(this_chid);
+    const extraCharLore = world_info.charLore?.find((e) => e.name === fileName);
+    return JSON.stringify([
+        worldInfoBooksVersion,
+        Number(world_info_character_strategy),
+        selected_world_info,
+        chat_metadata[METADATA_KEY] || '',
+        power_user.persona_description_lorebook || '',
+        characters[this_chid]?.data?.extensions?.world || '',
+        extraCharLore?.extraBooks || [],
+    ]);
+}
+
+/**
+ * Collects the names of all books that buildSortedEntries would read.
+ * @returns {Set<string>} Names of the applicable books
+ */
+function getSortedEntriesBookNames() {
+    const names = new Set(selected_world_info);
+    if (chat_metadata[METADATA_KEY]) {
+        names.add(chat_metadata[METADATA_KEY]);
+    }
+    if (power_user.persona_description_lorebook) {
+        names.add(power_user.persona_description_lorebook);
+    }
+    const baseWorldName = characters[this_chid]?.data?.extensions?.world;
+    if (baseWorldName) {
+        names.add(baseWorldName);
+    }
+    const fileName = getCharaFilename(this_chid);
+    const extraCharLore = world_info.charLore?.find((e) => e.name === fileName);
+    for (const book of extraCharLore?.extraBooks ?? []) {
+        names.add(book);
+    }
+    return names;
+}
+
 export async function getSortedEntries() {
     try {
-        const [
-            globalLore,
-            characterLore,
-            chatLore,
-            personaLore,
-        ] = await Promise.all([
-            getGlobalLore(),
-            getCharacterLore(),
-            getChatLore(),
-            getPersonaLore(),
-        ]);
-
-        await eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore });
-
-        let entries;
-
-        switch (Number(world_info_character_strategy)) {
-            case world_info_insertion_strategy.evenly:
-                entries = [...globalLore, ...characterLore].sort(sortFn);
-                break;
-            case world_info_insertion_strategy.character_first:
-                entries = [...characterLore.sort(sortFn), ...globalLore.sort(sortFn)];
-                break;
-            case world_info_insertion_strategy.global_first:
-                entries = [...globalLore.sort(sortFn), ...characterLore.sort(sortFn)];
-                break;
-            default:
-                console.error('[WI] Unknown WI insertion strategy:', world_info_character_strategy, 'defaulting to evenly');
-                entries = [...globalLore, ...characterLore].sort(sortFn);
-                break;
+        // Extensions listening for this event expect it on every call - keep the legacy path for them.
+        const hasEntriesLoadedListeners = !!eventSource.events[event_types.WORLDINFO_ENTRIES_LOADED]?.length;
+        const memoKey = hasEntriesLoadedListeners ? null : getSortedEntriesMemoKey();
+        if (memoKey && sortedEntriesMemo?.key === memoKey) {
+            return sortedEntriesMemo.entries.map((entry) => ({ ...entry }));
         }
-
-        // Chat lore always goes first, then persona lore, then the rest
-        entries = [...chatLore.sort(sortFn), ...personaLore.sort(sortFn), ...entries];
-
-        // Calculate hash and parse decorators. Split maps to preserve old hashes.
-        entries = entries.map((entry) => {
-            const [decorators, content] = parseDecorators(entry.content || '');
-            return { ...entry, decorators, content };
-        }).map((entry) => {
-            const hash = getStringHash(JSON.stringify(entry));
-            return { ...entry, hash };
-        });
-
-        console.debug(`[WI] Found ${entries.length} world lore entries. Sorted by strategy`, Object.entries(world_info_insertion_strategy).find((x) => x[1] === world_info_character_strategy));
-
-        // Need to deep clone the entries to avoid modifying the cached data
-        return structuredClone(entries);
+        const entries = await buildSortedEntries();
+        // Only memoize when every book was served from the cache: a failed book load
+        // is not cached and must stay retryable on the next call, like before.
+        const allBooksCached = memoKey && [...getSortedEntriesBookNames()].every((name) => worldInfoCache.has(name));
+        sortedEntriesMemo = allBooksCached ? { key: memoKey, entries } : null;
+        // Hand out call-local entry objects: the scan path replaces top-level fields
+        // (macro substitution writes entry.content) and that must never leak into
+        // shared data. Nested objects (keys, decorators, ...) must not be mutated.
+        return entries.map((entry) => ({ ...entry }));
     } catch (e) {
         console.error(e);
         return [];
     }
+}
+
+/**
+ * Loads all applicable lore books and builds the sorted list of their entries.
+ * @returns {Promise<object[]>} Freshly built sorted entries
+ */
+async function buildSortedEntries() {
+    const [
+        globalLore,
+        characterLore,
+        chatLore,
+        personaLore,
+    ] = await Promise.all([
+        getGlobalLore(),
+        getCharacterLore(),
+        getChatLore(),
+        getPersonaLore(),
+    ]);
+
+    await eventSource.emit(event_types.WORLDINFO_ENTRIES_LOADED, { globalLore, characterLore, chatLore, personaLore });
+
+    let entries;
+
+    switch (Number(world_info_character_strategy)) {
+        case world_info_insertion_strategy.evenly:
+            entries = [...globalLore, ...characterLore].sort(sortFn);
+            break;
+        case world_info_insertion_strategy.character_first:
+            entries = [...characterLore.sort(sortFn), ...globalLore.sort(sortFn)];
+            break;
+        case world_info_insertion_strategy.global_first:
+            entries = [...globalLore.sort(sortFn), ...characterLore.sort(sortFn)];
+            break;
+        default:
+            console.error('[WI] Unknown WI insertion strategy:', world_info_character_strategy, 'defaulting to evenly');
+            entries = [...globalLore, ...characterLore].sort(sortFn);
+            break;
+    }
+
+    // Chat lore always goes first, then persona lore, then the rest
+    entries = [...chatLore.sort(sortFn), ...personaLore.sort(sortFn), ...entries];
+
+    // Calculate hash and parse decorators. Split maps to preserve old hashes.
+    entries = entries.map((entry) => {
+        const [decorators, content] = parseDecorators(entry.content || '');
+        return { ...entry, decorators, content };
+    }).map((entry) => {
+        const hash = getStringHash(JSON.stringify(entry));
+        return { ...entry, hash };
+    });
+
+    console.debug(`[WI] Found ${entries.length} world lore entries. Sorted by strategy`, Object.entries(world_info_insertion_strategy).find((x) => x[1] === world_info_character_strategy));
+
+    return entries;
 }
 
 
