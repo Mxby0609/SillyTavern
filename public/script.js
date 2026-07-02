@@ -1804,9 +1804,20 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         }
 
         const regexPlacement = getRegexPlacement();
-        const usableMessages = chat.map((x, index) => ({ message: x, index: index })).filter(x => !x.message.is_system);
-        const indexOf = usableMessages.findIndex(x => x.index === Number(messageId));
-        const depth = messageId >= 0 && indexOf !== -1 ? (usableMessages.length - indexOf - 1) : undefined;
+        // Depth is the number of non-system messages after this one; system
+        // messages have no depth. Counting only the tail keeps this O(1) for
+        // the last message - the streaming case - instead of scanning and
+        // copying the whole chat on every call.
+        let depth;
+        const numericMessageId = Number(messageId);
+        if (messageId >= 0 && Number.isInteger(numericMessageId) && chat[numericMessageId] && !chat[numericMessageId].is_system) {
+            depth = 0;
+            for (let i = numericMessageId + 1; i < chat.length; i++) {
+                if (!chat[i].is_system) {
+                    depth++;
+                }
+            }
+        }
 
         // Always override the character name
         mes = getRegexedString(mes, regexPlacement, {
