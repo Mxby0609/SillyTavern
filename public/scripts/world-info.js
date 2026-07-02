@@ -197,7 +197,7 @@ const defaultGlobalScanData = Object.freeze({
 /**
  * Represents a scanning buffer for one evaluation of World Info.
  */
-class WorldInfoBuffer {
+export class WorldInfoBuffer {
     /**
      * @type {Map<string, object>} Map of entries that need to be activated no matter what
      */
