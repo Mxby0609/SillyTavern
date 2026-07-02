@@ -154,13 +154,18 @@ test.describe('Performance baseline', () => {
             contentType: 'application/json',
         });
 
-        // Persist under perf/results/<stage>-<date>.json for cross-stage diffs.
-        const stage = process.env.PERF_STAGE ?? 'baseline';
-        const outDir = path.resolve(new URL('.', import.meta.url).pathname, '../../perf/results');
-        fs.mkdirSync(outDir, { recursive: true });
-        const outFile = path.join(outDir, `${stage}-${new Date().toISOString().slice(0, 10)}.json`);
-        fs.writeFileSync(outFile, JSON.stringify(results, null, 2));
-        console.log(`Saved: ${outFile}`);
+        // Persist under perf/results/<stage>-<date>.json for cross-stage
+        // diffs — but only for dedicated measurement runs that set
+        // PERF_STAGE. Plain regression-suite runs must not overwrite the
+        // recorded stage data with numbers from whatever code is checked out.
+        const stage = process.env.PERF_STAGE;
+        if (stage) {
+            const outDir = path.resolve(new URL('.', import.meta.url).pathname, '../../perf/results');
+            fs.mkdirSync(outDir, { recursive: true });
+            const outFile = path.join(outDir, `${stage}-${new Date().toISOString().slice(0, 10)}.json`);
+            fs.writeFileSync(outFile, JSON.stringify(results, null, 2));
+            console.log(`Saved: ${outFile}`);
+        }
     });
 });
 

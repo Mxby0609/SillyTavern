@@ -59,10 +59,12 @@ Scenarios covered: open 200k chat (render), switch completion source ×2
 (dry-run), model change (dry-run), drawer open after config changes
 (deferred dry-run replay under the lazy-render optimization), prompt
 assembly via dry-run Generate (the pre-network cost of a send), chat +
-token-cache save. The JSON report is printed to the runner output, attached
-as a test artifact, and saved to `perf/results/<stage>-<date>.json`.
+token-cache save. The JSON report is printed to the runner output and
+attached as a test artifact. It is saved to
+`perf/results/<stage>-<date>.json` **only when `PERF_STAGE` is set** —
+plain regression-suite runs never overwrite recorded stage data.
 
-Tag the stage when measuring after an optimization:
+Tag the stage when measuring:
 
 ```bash
 PERF_STAGE=after-1.1 npx playwright test perf-baseline --workers 1
