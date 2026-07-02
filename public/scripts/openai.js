@@ -69,6 +69,7 @@ import {
 } from './utils.js';
 import { countTokensOpenAIAsync, getTokenizerModel } from './tokenizers.js';
 import { isMobile } from './RossAscends-mods.js';
+import { perfMark, perfMeasure } from './perf-metrics.js';
 import { saveLogprobsForActiveMessage } from './logprobs.js';
 import { SlashCommandParser } from './slash-commands/SlashCommandParser.js';
 import { SlashCommand } from './slash-commands/SlashCommand.js';
@@ -1575,7 +1576,9 @@ export async function prepareOpenAIMessages({
         });
 
         // Fill the chat completion with as much context as the budget allows
+        perfMark('oai-populate:start');
         await populateChatCompletion(prompts, chatCompletion, { bias, quietPrompt, quietImage, type, cyclePrompt, messages, messageExamples });
+        perfMeasure('oai-populate', 'oai-populate:start');
     } catch (error) {
         if (error instanceof TokenBudgetExceededError) {
             toastr.error(t`Mandatory prompts exceed the context size.`);

@@ -286,6 +286,7 @@ import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
+import { perfMark, perfMeasure, perfAccum, perfNow } from './scripts/perf-metrics.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 // API OBJECT FOR EXTERNAL WIRING
@@ -1495,6 +1496,7 @@ export async function printMessages() {
  * @param {Boolean} [options.fade=true] When false, the swipe chevrons will not fade in.
  */
 export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = true } = {}) {
+    perfMark('chat-render:start');
     const messageElements = chatElement.find('.mes');
     messageElements.removeClass('last_mes');
 
@@ -1527,6 +1529,7 @@ export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = 
     updateEditArrowClasses();
 
     console.info(`Rendered ${targetChat.length - startIndex} messages in ${((performance.now() - t1) / 1000).toFixed(3)} seconds.`);
+    perfMeasure('chat-render', 'chat-render:start');
 }
 
 export function scrollOnMediaLoad() {
@@ -3582,6 +3585,7 @@ class StreamingProcessor {
     }
 
     async onProgressStreaming(messageId, text, isFinal) {
+        const tickStart = perfNow();
         const isImpersonate = this.type == 'impersonate';
         const isContinue = this.type == 'continue';
 
@@ -3682,6 +3686,8 @@ class StreamingProcessor {
         if (!scrollLock) {
             scrollChatToBottom({ waitForFrame: true });
         }
+
+        perfAccum('stream-tick', perfNow() - tickStart);
     }
 
     /**
@@ -4230,6 +4236,7 @@ function removeLastMessage() {
  */
 export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0 } = {}, dryRun = false) {
     console.log('Generate entered');
+    perfMark('gen-preflight:start');
     setGenerationProgress(0);
     generation_started = new Date();
 
@@ -5256,6 +5263,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         }
     }
 
+    perfMeasure('gen-preflight', 'gen-preflight:start');
     await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun);
 
     if (dryRun) {
@@ -7373,6 +7381,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
     };
 
     try {
+        perfMark('chat-save:start');
         const saveChatRequest = await compressRequest({
             method: 'POST',
             cache: 'no-cache',
@@ -7386,6 +7395,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
             }),
         });
         const result = await fetch('/api/chats/save', saveChatRequest);
+        perfMeasure('chat-save', 'chat-save:start');
 
         if (result.ok) {
             return;

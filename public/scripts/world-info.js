@@ -23,6 +23,7 @@ import { renderTemplateAsync } from './templates.js';
 import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { getOrCreatePersonaDescriptor, setPersonaDescription, user_avatar } from './personas.js';
+import { perfMark, perfMeasure } from './perf-metrics.js';
 
 export const world_info_insertion_strategy = {
     evenly: 0,
@@ -892,7 +893,9 @@ export const worldInfoCache = new StructuredCloneMap({ cloneOnGet: true, cloneOn
 export async function getWorldInfoPrompt(chat, maxContext, isDryRun, globalScanData) {
     let worldInfoString = '', worldInfoBefore = '', worldInfoAfter = '';
 
+    perfMark('wi-scan:start');
     const activatedWorldInfo = await checkWorldInfo(chat, maxContext, isDryRun, globalScanData);
+    perfMeasure('wi-scan', 'wi-scan:start');
     worldInfoBefore = activatedWorldInfo.worldInfoBefore;
     worldInfoAfter = activatedWorldInfo.worldInfoAfter;
     worldInfoString = worldInfoBefore + worldInfoAfter;
