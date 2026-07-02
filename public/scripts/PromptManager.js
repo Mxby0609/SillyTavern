@@ -418,6 +418,9 @@ class PromptManager {
 
         /** Debounced version of render */
         this.renderDebounced = debounce(this.render.bind(this), debounce_timeout.relaxed);
+
+        /** Render request deferred while the panel is hidden (see deferRender) */
+        this.deferredRender = { pending: false, afterTryGenerate: false };
     }
 
 
@@ -835,6 +838,11 @@ class PromptManager {
         // Re-render prompt manager on world settings update
         eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, () => this.renderDebounced());
 
+        // Replay renders deferred while the panel was hidden
+        eventSource.on(event_types.NAVBAR_DRAWER_TOGGLED, (data) => {
+            if (data?.isOpen) this.flushDeferredRender();
+        });
+
         this.log('Initialized');
     }
 
@@ -864,6 +872,15 @@ class PromptManager {
         if (main_api !== 'openai') return;
 
         if ('character' === this.configuration.promptOrder.strategy && null === this.activeCharacter) return;
+
+        // While the panel is hidden, don't pay for the dry-run (a full prompt
+        // assembly incl. World Info scan and token counting) or the DOM
+        // rebuild. Record the request and replay it once the drawer opens.
+        if (!this.isPanelVisible()) {
+            this.deferRender(afterTryGenerate);
+            return;
+        }
+
         this.error = null;
 
         waitUntilCondition(() => !is_send_press && !is_group_generating, 1024 * 1024, 100).then(async () => {
@@ -899,6 +916,41 @@ class PromptManager {
         }).catch(() => {
             console.log('Timeout while waiting for send press to be false');
         });
+    }
+
+    /**
+     * Whether the prompt manager's container is actually rendered on screen
+     * (its drawer is open and no ancestor hides it).
+     * @returns {boolean}
+     */
+    isPanelVisible() {
+        const container = this.containerElement ?? document.getElementById(this.configuration.containerIdentifier);
+        return !!container && container.offsetParent !== null;
+    }
+
+    /**
+     * Records a render request to be replayed when the panel becomes visible.
+     * A dry-run request is sticky: if any deferred request needed one, the
+     * replay performs one.
+     * @param {boolean} afterTryGenerate - Whether the deferred render needs a dry run
+     */
+    deferRender(afterTryGenerate) {
+        this.deferredRender.pending = true;
+        this.deferredRender.afterTryGenerate = this.deferredRender.afterTryGenerate || afterTryGenerate;
+    }
+
+    /**
+     * Replays the newest deferred render request, once, if the panel is
+     * visible. Called when a navbar drawer opens.
+     */
+    flushDeferredRender() {
+        if (!this.deferredRender.pending) return;
+        if (!this.isPanelVisible()) return;
+
+        const afterTryGenerate = this.deferredRender.afterTryGenerate;
+        this.deferredRender.pending = false;
+        this.deferredRender.afterTryGenerate = false;
+        this.render(afterTryGenerate);
     }
 
     /**

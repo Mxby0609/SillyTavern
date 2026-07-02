@@ -25,7 +25,9 @@ const WORLD_NAME = 'PerfBench';
 const CHARACTER_NAME = 'Seraphina';
 
 // Dry-run debounce is 1000ms; give the run itself generous room on top.
-const DRYRUN_SETTLE_MS = 20000;
+// (Also the timeout price paid per scenario when lazy dry-run defers the
+// work and the measure legitimately never appears.)
+const DRYRUN_SETTLE_MS = 8000;
 
 test.describe.configure({ mode: 'serial' });
 
@@ -104,6 +106,22 @@ test.describe('Performance baseline', () => {
         });
         await waitForMeasure(page, 'pm-dryrun', DRYRUN_SETTLE_MS);
         results['model-change'] = await collectMetrics(page);
+
+        // --- Scenario: open the AI-config drawer. With lazy dry-run, this ---
+        // --- replays the render deferred by the config changes above ---
+        // --- (exactly one); on the unoptimized code it is a no-op. ---
+        await resetMetrics(page);
+        await page.click('#ai-config-button .drawer-toggle');
+        await waitForMeasure(page, 'pm-dryrun', DRYRUN_SETTLE_MS);
+        results['drawer-open-after-config-change'] = await collectMetrics(page);
+
+        // Whichever code path ran, the prompt manager list must be populated.
+        const pmListCount = await page.evaluate(() => document.querySelectorAll('#completion_prompt_manager_list > *').length);
+        expect(pmListCount).toBeGreaterThan(0);
+
+        // Close the drawer again so later scenarios run in the hidden state.
+        await page.click('#ai-config-button .drawer-toggle');
+        await page.waitForTimeout(500);
 
         // --- Scenario: full prompt assembly (dry-run Generate — the same ---
         // --- work a real send performs before the network call; a real ---

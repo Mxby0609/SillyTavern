@@ -30,6 +30,7 @@ export const event_types = {
     SETTINGS_UPDATED: 'settings_updated',
     GROUP_UPDATED: 'group_updated',
     MOVABLE_PANELS_RESET: 'movable_panels_reset',
+    NAVBAR_DRAWER_TOGGLED: 'navbar_drawer_toggled',
     SETTINGS_LOADED_BEFORE: 'settings_loaded_before',
     SETTINGS_LOADED_AFTER: 'settings_loaded_after',
     CHATCOMPLETION_SOURCE_CHANGED: 'chatcompletion_source_changed',

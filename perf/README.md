@@ -56,9 +56,17 @@ npx playwright test perf-baseline --workers 1   # terminal 2
 ```
 
 Scenarios covered: open 200k chat (render), switch completion source ×2
-(dry-run), model change (dry-run), send message (preflight + WI scan + token
-counting + save tail). The JSON report is printed to the runner output and
-attached as a test artifact.
+(dry-run), model change (dry-run), drawer open after config changes
+(deferred dry-run replay under the lazy-render optimization), prompt
+assembly via dry-run Generate (the pre-network cost of a send), chat +
+token-cache save. The JSON report is printed to the runner output, attached
+as a test artifact, and saved to `perf/results/<stage>-<date>.json`.
+
+Tag the stage when measuring after an optimization:
+
+```bash
+PERF_STAGE=after-1.1 npx playwright test perf-baseline --workers 1
+```
 
 Manual scenarios (need a live LLM backend, not covered by the script):
 long-reply streaming (`stream-tick`), non-OpenAI `checkPromptSize` overflow.
