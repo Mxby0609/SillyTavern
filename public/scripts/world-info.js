@@ -234,6 +234,18 @@ class WorldInfoBuffer {
     #startDepth = 0;
 
     /**
+     * @type {Map<string, string>} Scan strings already built by `get`, keyed by their build inputs.
+     * Only lives for one scan, so it can never serve stale data.
+     */
+    #getCache = new Map();
+
+    /**
+     * @type {Map<string, string>} Lowercased versions of large scanned strings.
+     * Only lives for one scan, so it can never serve stale data.
+     */
+    #lowerCache = new Map();
+
+    /**
      * Initialize the buffer with the given messages.
      * @param {string[]} messages Array of messages to add to the buffer
      * @param {WIGlobalScanData} globalScanData Chat independent context to be scanned
@@ -268,7 +280,21 @@ class WorldInfoBuffer {
     */
     #transformString(str, entry) {
         const caseSensitive = entry.caseSensitive ?? world_info_case_sensitive;
-        return caseSensitive ? str : str.toLowerCase();
+        if (caseSensitive) {
+            return str;
+        }
+        // Lowercasing the scanned text is a hot path: it runs once per key per entry
+        // on a string that can span the whole scan depth. Short strings (keys) are
+        // cheaper to lowercase than to cache.
+        if (str.length < 1024) {
+            return str.toLowerCase();
+        }
+        let lowered = this.#lowerCache.get(str);
+        if (lowered === undefined) {
+            lowered = str.toLowerCase();
+            this.#lowerCache.set(str, lowered);
+        }
+        return lowered;
     }
 
     /**
@@ -291,6 +317,25 @@ class WorldInfoBuffer {
         if (depth > MAX_SCAN_DEPTH) {
             console.warn(`[WI] Invalid WI scan depth ${depth}. Truncating to ${MAX_SCAN_DEPTH}`);
             depth = MAX_SCAN_DEPTH;
+        }
+
+        // The result only depends on the inputs below, and entries share few distinct
+        // combinations, so identical scan strings are only built once per scan.
+        const includeRecurse = this.#recurseBuffer.length > 0 && scanState !== scan_state.MIN_ACTIVATIONS;
+        const cacheKey = [
+            depth,
+            Number(!!(entry.matchPersonaDescription && this.#globalScanData.personaDescription)),
+            Number(!!(entry.matchCharacterDescription && this.#globalScanData.characterDescription)),
+            Number(!!(entry.matchCharacterPersonality && this.#globalScanData.characterPersonality)),
+            Number(!!(entry.matchCharacterDepthPrompt && this.#globalScanData.characterDepthPrompt)),
+            Number(!!(entry.matchScenario && this.#globalScanData.scenario)),
+            Number(!!(entry.matchCreatorNotes && this.#globalScanData.creatorNotes)),
+            this.#injectBuffer.length,
+            includeRecurse ? this.#recurseBuffer.length : 0,
+        ].join('|');
+        const cachedResult = this.#getCache.get(cacheKey);
+        if (cachedResult !== undefined) {
+            return cachedResult;
         }
 
         const MATCHER = '\x01';
@@ -321,10 +366,11 @@ class WorldInfoBuffer {
         }
 
         // Min activations should not include the recursion buffer
-        if (this.#recurseBuffer.length > 0 && scanState !== scan_state.MIN_ACTIVATIONS) {
+        if (includeRecurse) {
             result += JOINER + this.#recurseBuffer.join(JOINER);
         }
 
+        this.#getCache.set(cacheKey, result);
         return result;
     }
 
@@ -337,7 +383,7 @@ class WorldInfoBuffer {
      */
     matchKeys(haystack, needle, entry) {
         // If the needle is a regex, we do regex pattern matching and override all the other options
-        const keyRegex = parseRegexFromString(needle);
+        const keyRegex = getScanKeyRegex(needle);
         if (keyRegex) {
             return keyRegex.test(haystack);
         }
@@ -353,8 +399,7 @@ class WorldInfoBuffer {
             if (keyWords.length > 1) {
                 return haystack.includes(transformedString);
             } else {
-                // Use custom boundaries to include punctuation and other non-alphanumeric characters
-                const regex = new RegExp(`(?:^|\\W)(${escapeRegex(transformedString)})(?:$|\\W)`);
+                const regex = getScanWholeWordRegex(transformedString);
                 if (regex.test(haystack)) {
                     return true;
                 }
@@ -2848,6 +2893,54 @@ export function parseRegexFromString(input) {
     }
 }
 
+const MAX_SCAN_REGEX_CACHE = 1000;
+
+/** @type {Map<string, RegExp|null>} Cache of parsed slash-delimited key regexes for the scan loop */
+const scanKeyRegexCache = new Map();
+
+/** @type {Map<string, RegExp>} Cache of compiled whole-word key regexes for the scan loop */
+const scanWholeWordRegexCache = new Map();
+
+/**
+ * Cached version of `parseRegexFromString` for the scan loop.
+ * @param {string} needle - A delimited regex string
+ * @returns {RegExp|null} The regex object, or null if not a valid regex
+ */
+function getScanKeyRegex(needle) {
+    let regex = scanKeyRegexCache.get(needle);
+    if (regex === undefined) {
+        if (scanKeyRegexCache.size >= MAX_SCAN_REGEX_CACHE) {
+            scanKeyRegexCache.clear();
+        }
+        regex = parseRegexFromString(needle);
+        scanKeyRegexCache.set(needle, regex);
+    }
+    // Global/sticky regexes keep their lastIndex between test() calls.
+    // A freshly parsed regex always starts at 0, so reset to match that.
+    if (regex && (regex.global || regex.sticky)) {
+        regex.lastIndex = 0;
+    }
+    return regex;
+}
+
+/**
+ * Gets a cached whole-word matching regex for the given key.
+ * @param {string} transformedString - The key already transformed for case sensitivity
+ * @returns {RegExp} The compiled regex
+ */
+function getScanWholeWordRegex(transformedString) {
+    let regex = scanWholeWordRegexCache.get(transformedString);
+    if (regex === undefined) {
+        if (scanWholeWordRegexCache.size >= MAX_SCAN_REGEX_CACHE) {
+            scanWholeWordRegexCache.clear();
+        }
+        // Use custom boundaries to include punctuation and other non-alphanumeric characters
+        regex = new RegExp(`(?:^|\\W)(${escapeRegex(transformedString)})(?:$|\\W)`);
+        scanWholeWordRegexCache.set(transformedString, regex);
+    }
+    return regex;
+}
+
 /**
  * Enables the input helper for keys in a World Info entry.
  * @param {object} params - Parameters for enabling the keys input helper.
@@ -4526,8 +4619,10 @@ export async function getSortedEntries() {
 
         console.debug(`[WI] Found ${entries.length} world lore entries. Sorted by strategy`, Object.entries(world_info_insertion_strategy).find((x) => x[1] === world_info_character_strategy));
 
-        // Need to deep clone the entries to avoid modifying the cached data
-        return structuredClone(entries);
+        // Entries are already call-local here: the cache clones book data on every read,
+        // and the maps above build fresh entry objects on top of that. Callers may replace
+        // top-level fields, but must not mutate nested objects (keys, decorators, ...).
+        return entries;
     } catch (e) {
         console.error(e);
         return [];
