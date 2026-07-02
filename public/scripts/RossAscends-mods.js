@@ -35,7 +35,7 @@ import {
 } from './secrets.js';
 import { debounce, getStringHash, isValidUrl } from './utils.js';
 import { chat_completion_sources, oai_settings } from './openai.js';
-import { getTokenCountAsync } from './tokenizers.js';
+import { getTokenCountAsync, primeTokenCountsAsync } from './tokenizers.js';
 import { textgen_types, textgenerationwebui_settings as textgen_settings, getTextGenServer } from './textgen-settings.js';
 import { debounce_timeout, SWIPE_SOURCE } from './constants.js';
 
@@ -211,11 +211,8 @@ export async function RA_CountCharTokens() {
     let permanent_tokens = 0;
 
     const tokenCounters = document.querySelectorAll('[data-token-counter]');
+    const pendingCounts = [];
     for (const tokenCounter of tokenCounters) {
-        if (counterNonceLocal !== counterNonce) {
-            return;
-        }
-
         const counter = $(tokenCounter);
         const input = $(document.getElementById(counter.data('token-counter')));
         const isPermanent = counter.data('token-permanent') === true;
@@ -237,20 +234,40 @@ export async function RA_CountCharTokens() {
         if (input.data('last-value-hash') === valueHash) {
             total_tokens += Number(counter.text());
             permanent_tokens += isPermanent ? Number(counter.text()) : 0;
-        } else {
-            // We substitute macro for existing characters, but not for the character being created
-            const valueToCount = menu_type === 'create' ? value : substituteParams(value);
-            const tokens = await getTokenCountAsync(valueToCount);
-
-            if (counterNonceLocal !== counterNonce) {
-                return;
-            }
-
-            counter.text(tokens);
-            total_tokens += tokens;
-            permanent_tokens += isPermanent ? tokens : 0;
-            input.data('last-value-hash', valueHash);
+            continue;
         }
+
+        pendingCounts.push({ counter, input, isPermanent, valueHash, value });
+    }
+
+    // One batched request warms the cache for the macro-free changed fields.
+    // Fields containing macros are left to the loop below: substitution may
+    // run state-changing macros ({{setvar}} and friends) and must keep the
+    // original per-field timing and nonce cancellation.
+    const primeableValues = pendingCounts
+        .filter(x => !x.value.includes('{{'))
+        .map(x => menu_type === 'create' ? x.value : substituteParams(x.value));
+    if (primeableValues.length > 1) {
+        await primeTokenCountsAsync(primeableValues);
+    }
+
+    for (const { counter, input, isPermanent, valueHash, value } of pendingCounts) {
+        if (counterNonceLocal !== counterNonce) {
+            return;
+        }
+
+        // We substitute macro for existing characters, but not for the character being created
+        const valueToCount = menu_type === 'create' ? value : substituteParams(value);
+        const tokens = await getTokenCountAsync(valueToCount);
+
+        if (counterNonceLocal !== counterNonce) {
+            return;
+        }
+
+        counter.text(tokens);
+        total_tokens += tokens;
+        permanent_tokens += isPermanent ? tokens : 0;
+        input.data('last-value-hash', valueHash);
     }
 
     // Warn if total tokens exceeds the limit of half the max context

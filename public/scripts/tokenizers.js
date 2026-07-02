@@ -14,6 +14,11 @@ export const BYTES_PER_TOKEN = 3.35;
 export const TOKENIZER_WARNING_KEY = 'tokenizationWarningShown';
 export const TOKENIZER_SUPPORTED_KEY = 'tokenizationSupported';
 
+// Chunk sizes for batched token cache priming. Chunks grow so prompts that
+// stop early overshoot little, while long chats need only a few requests.
+export const TOKEN_BATCH_CHUNK_INITIAL = 8;
+export const TOKEN_BATCH_CHUNK_MAX = 256;
+
 export const tokenizers = {
     NONE: 0,
     GPT2: 1,
@@ -68,6 +73,7 @@ const TOKENIZER_URLS = {
         encode: '/api/tokenizers/gpt2/encode',
         decode: '/api/tokenizers/gpt2/decode',
         count: '/api/tokenizers/gpt2/encode',
+        countBatch: '/api/tokenizers/gpt2/count_batch',
     },
     [tokenizers.OPENAI]: {
         encode: '/api/tokenizers/openai/encode',
@@ -78,16 +84,19 @@ const TOKENIZER_URLS = {
         encode: '/api/tokenizers/llama/encode',
         decode: '/api/tokenizers/llama/decode',
         count: '/api/tokenizers/llama/encode',
+        countBatch: '/api/tokenizers/llama/count_batch',
     },
     [tokenizers.NERD]: {
         encode: '/api/tokenizers/nerdstash/encode',
         decode: '/api/tokenizers/nerdstash/decode',
         count: '/api/tokenizers/nerdstash/encode',
+        countBatch: '/api/tokenizers/nerdstash/count_batch',
     },
     [tokenizers.NERD2]: {
         encode: '/api/tokenizers/nerdstash_v2/encode',
         decode: '/api/tokenizers/nerdstash_v2/decode',
         count: '/api/tokenizers/nerdstash_v2/encode',
+        countBatch: '/api/tokenizers/nerdstash_v2/count_batch',
     },
     [tokenizers.API_KOBOLD]: {
         count: '/api/tokenizers/remote/kobold/count',
@@ -97,56 +106,67 @@ const TOKENIZER_URLS = {
         encode: '/api/tokenizers/mistral/encode',
         decode: '/api/tokenizers/mistral/decode',
         count: '/api/tokenizers/mistral/encode',
+        countBatch: '/api/tokenizers/mistral/count_batch',
     },
     [tokenizers.YI]: {
         encode: '/api/tokenizers/yi/encode',
         decode: '/api/tokenizers/yi/decode',
         count: '/api/tokenizers/yi/encode',
+        countBatch: '/api/tokenizers/yi/count_batch',
     },
     [tokenizers.CLAUDE]: {
         encode: '/api/tokenizers/claude/encode',
         decode: '/api/tokenizers/claude/decode',
         count: '/api/tokenizers/claude/encode',
+        countBatch: '/api/tokenizers/claude/count_batch',
     },
     [tokenizers.LLAMA3]: {
         encode: '/api/tokenizers/llama3/encode',
         decode: '/api/tokenizers/llama3/decode',
         count: '/api/tokenizers/llama3/encode',
+        countBatch: '/api/tokenizers/llama3/count_batch',
     },
     [tokenizers.GEMMA]: {
         encode: '/api/tokenizers/gemma/encode',
         decode: '/api/tokenizers/gemma/decode',
         count: '/api/tokenizers/gemma/encode',
+        countBatch: '/api/tokenizers/gemma/count_batch',
     },
     [tokenizers.JAMBA]: {
         encode: '/api/tokenizers/jamba/encode',
         decode: '/api/tokenizers/jamba/decode',
         count: '/api/tokenizers/jamba/encode',
+        countBatch: '/api/tokenizers/jamba/count_batch',
     },
     [tokenizers.QWEN2]: {
         encode: '/api/tokenizers/qwen2/encode',
         decode: '/api/tokenizers/qwen2/decode',
         count: '/api/tokenizers/qwen2/encode',
+        countBatch: '/api/tokenizers/qwen2/count_batch',
     },
     [tokenizers.COMMAND_R]: {
         encode: '/api/tokenizers/command-r/encode',
         decode: '/api/tokenizers/command-r/decode',
         count: '/api/tokenizers/command-r/encode',
+        countBatch: '/api/tokenizers/command-r/count_batch',
     },
     [tokenizers.COMMAND_A]: {
         encode: '/api/tokenizers/command-a/encode',
         decode: '/api/tokenizers/command-a/decode',
         count: '/api/tokenizers/command-a/encode',
+        countBatch: '/api/tokenizers/command-a/count_batch',
     },
     [tokenizers.NEMO]: {
         encode: '/api/tokenizers/nemo/encode',
         decode: '/api/tokenizers/nemo/decode',
         count: '/api/tokenizers/nemo/encode',
+        countBatch: '/api/tokenizers/nemo/count_batch',
     },
     [tokenizers.DEEPSEEK]: {
         encode: '/api/tokenizers/deepseek/encode',
         decode: '/api/tokenizers/deepseek/decode',
         count: '/api/tokenizers/deepseek/encode',
+        countBatch: '/api/tokenizers/deepseek/count_batch',
     },
     [tokenizers.API_TEXTGENERATIONWEBUI]: {
         encode: '/api/tokenizers/remote/textgenerationwebui/encode',
@@ -1072,6 +1092,162 @@ export async function countTokensOpenAIAsync(messages, full = false) {
     if (!full) token_count -= 2;
 
     return token_count;
+}
+
+/**
+ * Pre-computes token counts for chat completion messages with one batched
+ * request and fills the current chat's token cache. Each cached value is
+ * exactly what a single-message request to /openai/count would return, so
+ * subsequent countTokensOpenAIAsync calls for the same messages resolve from
+ * cache. Best-effort: on failure nothing is cached and the per-message
+ * requests take over.
+ * @param {object[]} messages Messages to prime the cache for.
+ * @returns {Promise<void>}
+ */
+export async function primeOpenAITokenCacheAsync(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+        return;
+    }
+
+    const model = getTokenizerModel();
+    const cacheObject = getTokenCacheObject();
+    const missMessages = [];
+    const missKeys = [];
+    const seenKeys = new Set();
+
+    for (const message of messages) {
+        const hash = getStringHash(JSON.stringify(message));
+        const cacheKey = `${model}-${hash}`;
+
+        if (typeof cacheObject[cacheKey] === 'number' || seenKeys.has(cacheKey)) {
+            continue;
+        }
+
+        seenKeys.add(cacheKey);
+        missMessages.push(message);
+        missKeys.push(cacheKey);
+    }
+
+    if (missMessages.length === 0) {
+        return;
+    }
+
+    try {
+        const data = await jQuery.ajax({
+            async: true,
+            type: 'POST',
+            url: `/api/tokenizers/openai/count_batch?model=${model}`,
+            data: JSON.stringify(missMessages),
+            dataType: 'json',
+            contentType: 'application/json',
+        });
+
+        const counts = Array.isArray(data?.token_counts) ? data.token_counts : [];
+        for (let i = 0; i < missKeys.length && i < counts.length; i++) {
+            const count = Number(counts[i]);
+            if (Number.isFinite(count)) {
+                cacheObject[missKeys[i]] = count;
+            }
+        }
+    } catch (error) {
+        console.warn('Batch token counting failed, falling back to per-message requests', error);
+    }
+}
+
+/**
+ * Pre-computes token counts for a batch of texts with the current tokenizer
+ * and fills the token cache, so subsequent getTokenCountAsync calls for the
+ * same texts resolve from cache. Mirrors getTokenCountAsync's caching: the
+ * cached value includes the padding. Tokenizer types without a batch endpoint
+ * (provider APIs, local estimation) are left to the regular per-call path.
+ * Best-effort: on failure nothing is cached.
+ * @param {string[]} texts Texts to prime the cache for.
+ * @param {number|undefined} padding Optional padding tokens, as passed to getTokenCountAsync.
+ * @returns {Promise<void>}
+ */
+export async function primeTokenCountsAsync(texts, padding = undefined) {
+    if (!Array.isArray(texts) || texts.length === 0) {
+        return;
+    }
+
+    let tokenizerType = power_user.tokenizer;
+    let modelHash = '';
+
+    if (main_api === 'openai') {
+        if (padding === power_user.token_padding) {
+            // Shadow prompt building counts locally; nothing to batch.
+            return;
+        }
+        // Extensions and WI count through the chat completion tokenizer.
+        const messages = texts
+            .filter(text => typeof text === 'string' && text.length > 0)
+            .map(text => ({ role: 'system', content: text }));
+        return primeOpenAITokenCacheAsync(messages);
+    }
+
+    if (tokenizerType === tokenizers.BEST_MATCH) {
+        tokenizerType = getTokenizerBestMatch(main_api);
+    }
+
+    if (tokenizerType === tokenizers.API_TEXTGENERATIONWEBUI) {
+        modelHash = getStringHash(getTextGenModel() || online_status).toString();
+    }
+
+    const endpointUrl = TOKENIZER_URLS[tokenizerType]?.countBatch;
+    if (!endpointUrl) {
+        return;
+    }
+
+    if (padding === undefined) {
+        padding = 0;
+    }
+
+    const cacheObject = getTokenCacheObject();
+    const missTexts = [];
+    const missKeys = [];
+    const seenKeys = new Set();
+
+    for (const text of texts) {
+        if (typeof text !== 'string' || !text.length) {
+            continue;
+        }
+
+        const hash = getStringHash(text);
+        const cacheKey = `${tokenizerType}-${hash}${modelHash}+${padding}`;
+
+        if (typeof cacheObject[cacheKey] === 'number' || seenKeys.has(cacheKey)) {
+            continue;
+        }
+
+        seenKeys.add(cacheKey);
+        missTexts.push(text);
+        missKeys.push(cacheKey);
+    }
+
+    if (missTexts.length === 0) {
+        return;
+    }
+
+    try {
+        const data = await jQuery.ajax({
+            async: true,
+            type: 'POST',
+            url: endpointUrl,
+            data: JSON.stringify({ texts: missTexts }),
+            dataType: 'json',
+            contentType: 'application/json',
+        });
+
+        const counts = Array.isArray(data?.counts) ? data.counts : [];
+        for (let i = 0; i < missKeys.length && i < counts.length; i++) {
+            const result = Number(counts[i]) + padding;
+            if (!isNaN(result)) {
+                cacheObject[missKeys[i]] = result;
+            }
+        }
+    } catch (error) {
+        console.warn('Batch token counting failed, falling back to per-text requests', error);
+    }
 }
 
 /**

@@ -67,7 +67,7 @@ import {
     textValueMatcher,
     uuidv4,
 } from './utils.js';
-import { countTokensOpenAIAsync, getTokenizerModel } from './tokenizers.js';
+import { countTokensOpenAIAsync, getTokenizerModel, primeOpenAITokenCacheAsync, TOKEN_BATCH_CHUNK_INITIAL, TOKEN_BATCH_CHUNK_MAX } from './tokenizers.js';
 import { isMobile } from './RossAscends-mods.js';
 import { perfMark, perfMeasure } from './perf-metrics.js';
 import { saveLogprobsForActiveMessage } from './logprobs.js';
@@ -935,18 +935,62 @@ async function populateChatHistory(messages, prompts, chatCompletion, type = nul
         : tool_reasoning_modes.DISABLED;
     const includeToolReasoning = toolReasoningMode !== tool_reasoning_modes.DISABLED;
     const lastUserIdx = messages.findLastIndex(x => x.role === 'user');
+    const namesInCompletion = promptManager.serviceSettings.names_behavior === character_names_behavior.COMPLETION;
 
     // Insert chat messages as long as there is budget available
     const chatPool = [...messages].reverse();
+    /** @type {Prompt[]} */
+    const preparedPool = new Array(chatPool.length);
+    let preparedUntil = 0;
+    let prepareChunkSize = TOKEN_BATCH_CHUNK_INITIAL;
     for (let index = 0; index < chatPool.length; index++) {
+        // Prepare upcoming messages in growing chunks and count each chunk in
+        // a single batched request, so the per-message counting below resolves
+        // from cache instead of issuing 1-2 requests per message.
+        if (index >= preparedUntil) {
+            let chunkEnd = Math.min(chatPool.length, index + prepareChunkSize);
+            const countables = [];
+            for (let chunkIndex = index; chunkIndex < chunkEnd; chunkIndex++) {
+                // Substitution may run state-changing macros ({{setvar}} and
+                // friends). A message containing macros is never prepared
+                // ahead of the loop cursor: the budget break could stop before
+                // it, and the original per-message path would then never have
+                // substituted it. The chunk's first item is the cursor itself,
+                // which the loop processes right after priming either way.
+                const rawContent = chatPool[chunkIndex]?.content;
+                if (chunkIndex > index && typeof rawContent === 'string' && rawContent.includes('{{')) {
+                    chunkEnd = chunkIndex;
+                    break;
+                }
+
+                // We do not want to mutate the prompt
+                const prompt = new Prompt(chatPool[chunkIndex]);
+                prompt.identifier = `chatHistory-${messages.length - chunkIndex}`;
+                const prepared = promptManager.preparePrompt(prompt);
+                preparedPool[chunkIndex] = prepared;
+
+                // Mirror the exact objects the counting below hashes:
+                // Message.createAsync counts { role, content }; setName counts
+                // { role, content, name } with the constructor's role default.
+                const role = prepared.role || 'system';
+                if (typeof prepared.content === 'string' && prepared.content.length > 0) {
+                    countables.push({ role: role, content: prepared.content });
+                }
+                if (namesInCompletion && prepared.name) {
+                    const messageName = promptManager.isValidName(prepared.name) ? prepared.name : promptManager.sanitizeName(prepared.name);
+                    countables.push({ role: role, content: prepared.content, name: messageName });
+                }
+            }
+            await primeOpenAITokenCacheAsync(countables);
+            preparedUntil = chunkEnd;
+            prepareChunkSize = Math.min(prepareChunkSize * 2, TOKEN_BATCH_CHUNK_MAX);
+        }
+
         const chatPrompt = chatPool[index];
+        const prompt = preparedPool[index];
+        const chatMessage = await Message.fromPromptAsync(prompt);
 
-        // We do not want to mutate the prompt
-        const prompt = new Prompt(chatPrompt);
-        prompt.identifier = `chatHistory-${messages.length - index}`;
-        const chatMessage = await Message.fromPromptAsync(promptManager.preparePrompt(prompt));
-
-        if (promptManager.serviceSettings.names_behavior === character_names_behavior.COMPLETION && prompt.name) {
+        if (namesInCompletion && prompt.name) {
             const messageName = promptManager.isValidName(prompt.name) ? prompt.name : promptManager.sanitizeName(prompt.name);
             await chatMessage.setName(messageName);
         }
