@@ -132,12 +132,14 @@ test.describe('Performance baseline', () => {
         });
         results['assemble-prompt'] = await collectMetrics(page);
 
-        // --- Scenario: save chat + token cache (the post-send tail) ---
+        // --- Scenario: save chat + token cache (the post-send tail). The ---
+        // --- cache write is idle-deferred under the sharding optimization, ---
+        // --- so wait for its measure instead of a fixed pause. ---
         await resetMetrics(page);
         await page.evaluate(async () => {
             await globalThis.SillyTavern.getContext().saveChat();
         });
-        await page.waitForTimeout(1000);
+        await waitForMeasure(page, 'tokencache-save', DRYRUN_SETTLE_MS);
         results['save-chat'] = await collectMetrics(page);
 
         // Deactivate the fixture lorebook so other suites are unaffected.

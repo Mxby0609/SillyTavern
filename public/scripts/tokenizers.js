@@ -157,7 +157,29 @@ const TOKENIZER_URLS = {
 const textEncoder = new TextEncoder();
 const objectStore = localforage.createInstance({ name: 'SillyTavern_ChatCompletions' });
 
+const TOKEN_CACHE_LEGACY_KEY = 'tokenCache';
+const TOKEN_CACHE_SHARD_PREFIX = 'tokenCache#';
+const TOKEN_CACHE_META_KEY = 'tokenCacheMeta';
+// Retention window for persisted per-chat token caches. Evicted chats just
+// re-tokenize on the next open; no user-visible data is lost.
+const TOKEN_CACHE_MAX_CHATS = 100;
+const TOKEN_CACHE_IDLE_TIMEOUT_MS = 1000;
+const TOKEN_CACHE_FALLBACK_DELAY_MS = 200;
+
+/** @type {Record<string, Record<string, number>>} Per-chat token counts, keyed by chat ID. */
 let tokenCache = {};
+/** @type {Record<string, number>} Last-used timestamp per chat shard, drives eviction. */
+let tokenCacheMeta = {};
+/** @type {Set<string>} Chat IDs whose shards await persistence. */
+const pendingCacheWrites = new Set();
+/** @type {boolean} Recency metadata changed since it was last persisted. */
+let tokenCacheMetaDirty = false;
+/** @type {{ cancel: () => void }|null} Scheduled idle flush, if any. */
+let pendingCacheFlush = null;
+/** @type {(() => void)[]} Resolvers of saveTokenCache() promises awaiting the next flush. */
+let pendingCacheFlushResolvers = [];
+/** @type {Promise<void>} The currently running flush, for reset to await. */
+let cacheFlushInFlight = Promise.resolve();
 
 /**
  * Guesstimates the token count for a string.
@@ -169,32 +191,195 @@ export function guesstimate(str) {
     return Math.ceil(byteLength / BYTES_PER_TOKEN);
 }
 
+/**
+ * @param {string} chatId Chat ID.
+ * @returns {string} Storage key of the chat's token cache shard.
+ */
+function getTokenCacheShardKey(chatId) {
+    return TOKEN_CACHE_SHARD_PREFIX + chatId;
+}
+
 async function loadTokenCache() {
     try {
         console.debug('Chat Completions: loading token cache');
-        tokenCache = await objectStore.getItem('tokenCache') || {};
+        tokenCache = {};
+        tokenCacheMeta = await objectStore.getItem(TOKEN_CACHE_META_KEY) || {};
+        await migrateLegacyTokenCache();
+        const shardChatIds = (await objectStore.keys())
+            .filter(key => key.startsWith(TOKEN_CACHE_SHARD_PREFIX))
+            .map(key => key.slice(TOKEN_CACHE_SHARD_PREFIX.length));
+        const retainedChatIds = await pruneTokenCacheShards(shardChatIds);
+        await Promise.all(retainedChatIds.map(async (chatId) => {
+            const shard = await objectStore.getItem(getTokenCacheShardKey(chatId));
+            if (shard && typeof shard === 'object') {
+                tokenCache[chatId] = shard;
+            }
+        }));
     } catch (e) {
         console.log('Chat Completions: unable to load token cache, using default value', e);
         tokenCache = {};
+        tokenCacheMeta = {};
     }
 }
 
-export async function saveTokenCache() {
+/**
+ * One-time split of the pre-sharding monolithic cache into per-chat shards.
+ * @returns {Promise<void>}
+ */
+async function migrateLegacyTokenCache() {
+    const legacyCache = await objectStore.getItem(TOKEN_CACHE_LEGACY_KEY);
+    if (!legacyCache || typeof legacyCache !== 'object') {
+        return;
+    }
+    console.debug('Chat Completions: migrating legacy token cache to per-chat shards');
+    // The legacy blob has no usage dates; treat insertion order as recency
+    // (later entries were first seen later) and only materialize the shards
+    // the retention pass would keep anyway.
+    const legacyEntries = Object.entries(legacyCache)
+        .filter(([, entries]) => entries && typeof entries === 'object')
+        .slice(-TOKEN_CACHE_MAX_CHATS);
+    const now = Date.now();
+    for (const [index, [chatId, entries]] of legacyEntries.entries()) {
+        await objectStore.setItem(getTokenCacheShardKey(chatId), entries);
+        tokenCacheMeta[chatId] = tokenCacheMeta[chatId] ?? (now - (legacyEntries.length - index));
+    }
+    await objectStore.setItem(TOKEN_CACHE_META_KEY, tokenCacheMeta);
+    await objectStore.removeItem(TOKEN_CACHE_LEGACY_KEY);
+}
+
+/**
+ * Drops the least recently used shards over the retention limit and
+ * reconciles the recency metadata with the shards actually on disk.
+ * @param {string[]} shardChatIds Chat IDs that have persisted shards.
+ * @returns {Promise<string[]>} Chat IDs whose shards were kept.
+ */
+async function pruneTokenCacheShards(shardChatIds) {
+    const shardIdSet = new Set(shardChatIds);
+    let metaChanged = false;
+    for (const chatId of shardChatIds) {
+        if (typeof tokenCacheMeta[chatId] !== 'number') {
+            // Undated shard (e.g. interrupted write): keep it, date it now.
+            tokenCacheMeta[chatId] = Date.now();
+            metaChanged = true;
+        }
+    }
+    for (const chatId of Object.keys(tokenCacheMeta)) {
+        if (!shardIdSet.has(chatId)) {
+            delete tokenCacheMeta[chatId];
+            metaChanged = true;
+        }
+    }
+    const sortedChatIds = [...shardChatIds].sort((a, b) => tokenCacheMeta[b] - tokenCacheMeta[a]);
+    const retained = sortedChatIds.slice(0, TOKEN_CACHE_MAX_CHATS);
+    const evicted = sortedChatIds.slice(TOKEN_CACHE_MAX_CHATS);
+    for (const chatId of evicted) {
+        await objectStore.removeItem(getTokenCacheShardKey(chatId));
+        delete tokenCacheMeta[chatId];
+        metaChanged = true;
+    }
+    if (evicted.length) {
+        console.debug(`Chat Completions: evicted ${evicted.length} token cache shard(s) over the ${TOKEN_CACHE_MAX_CHATS}-chat retention limit`);
+    }
+    if (metaChanged) {
+        await objectStore.setItem(TOKEN_CACHE_META_KEY, tokenCacheMeta);
+    }
+    return retained;
+}
+
+/**
+ * Queues the current chat's token cache shard for persistence. The write runs
+ * when the browser is idle (bounded by a timeout) instead of blocking the
+ * post-save path, and only covers the queued chats — not the whole cache.
+ * @returns {Promise<void>} Resolves once the queued write has been persisted.
+ */
+export function saveTokenCache() {
+    const chatId = getCurrentCacheChatId();
+    pendingCacheWrites.add(chatId);
+    tokenCacheMeta[chatId] = Date.now();
+    tokenCacheMetaDirty = true;
+    return new Promise((resolve) => {
+        pendingCacheFlushResolvers.push(resolve);
+        scheduleTokenCacheFlush();
+    });
+}
+
+function scheduleTokenCacheFlush() {
+    if (pendingCacheFlush) {
+        return;
+    }
+    if (typeof requestIdleCallback === 'function') {
+        const handle = requestIdleCallback(runTokenCacheFlush, { timeout: TOKEN_CACHE_IDLE_TIMEOUT_MS });
+        pendingCacheFlush = { cancel: () => cancelIdleCallback(handle) };
+    } else {
+        const handle = setTimeout(runTokenCacheFlush, TOKEN_CACHE_FALLBACK_DELAY_MS);
+        pendingCacheFlush = { cancel: () => clearTimeout(handle) };
+    }
+}
+
+function runTokenCacheFlush() {
+    pendingCacheFlush = null;
+    const resolvers = pendingCacheFlushResolvers;
+    pendingCacheFlushResolvers = [];
+    // Chain onto the previous flush: writes never interleave, and reset can
+    // await the tail of every outstanding flush via cacheFlushInFlight.
+    cacheFlushInFlight = cacheFlushInFlight
+        .then(() => flushTokenCacheWrites())
+        .finally(() => resolvers.forEach(resolve => resolve()));
+}
+
+/**
+ * Runs a scheduled flush immediately, e.g. when the page is being hidden.
+ * Also persists recency metadata touched by reads (which never schedule a
+ * flush of their own), so view-only usage survives the session.
+ */
+function flushTokenCacheNow() {
+    if (pendingCacheFlush) {
+        pendingCacheFlush.cancel();
+        runTokenCacheFlush();
+    } else if (tokenCacheMetaDirty) {
+        runTokenCacheFlush();
+    }
+}
+
+async function flushTokenCacheWrites() {
+    if (pendingCacheWrites.size === 0 && !tokenCacheMetaDirty) {
+        return;
+    }
+    const chatIds = [...pendingCacheWrites];
+    pendingCacheWrites.clear();
+    tokenCacheMetaDirty = false;
     try {
-        console.debug('Chat Completions: saving token cache');
+        console.debug('Chat Completions: saving token cache shards', chatIds);
         perfMark('tokencache-save:start');
-        await objectStore.setItem('tokenCache', tokenCache);
+        for (const chatId of chatIds) {
+            const shard = tokenCache[chatId];
+            if (shard && typeof shard === 'object') {
+                await objectStore.setItem(getTokenCacheShardKey(chatId), shard);
+            }
+        }
+        await objectStore.setItem(TOKEN_CACHE_META_KEY, tokenCacheMeta);
         perfMeasure('tokencache-save', 'tokencache-save:start');
     } catch (e) {
         console.log('Chat Completions: unable to save token cache', e);
+        // Requeue so the next chat save retries the failed shards.
+        chatIds.forEach(chatId => pendingCacheWrites.add(chatId));
+        tokenCacheMetaDirty = true;
     }
 }
 
 async function resetTokenCache() {
     try {
         console.debug('Chat Completions: resetting token cache');
+        pendingCacheWrites.clear();
+        // Don't let an in-flight write land after the purge.
+        await cacheFlushInFlight;
         Object.keys(tokenCache).forEach(key => delete tokenCache[key]);
-        await objectStore.removeItem('tokenCache');
+        tokenCacheMeta = {};
+        tokenCacheMetaDirty = false;
+        const keys = await objectStore.keys();
+        await Promise.all(keys
+            .filter(key => key === TOKEN_CACHE_LEGACY_KEY || key === TOKEN_CACHE_META_KEY || key.startsWith(TOKEN_CACHE_SHARD_PREFIX))
+            .map(key => objectStore.removeItem(key)));
         toastr.success('Token cache cleared. Please reload the chat to re-tokenize it.');
     } catch (e) {
         console.log('Chat Completions: unable to reset token cache', e);
@@ -890,10 +1075,10 @@ export async function countTokensOpenAIAsync(messages, full = false) {
 }
 
 /**
- * Gets the token cache object for the current chat.
- * @returns {Object} Token cache object for the current chat.
+ * Resolves the token cache key for the current chat.
+ * @returns {string} Cache key (chat ID) of the current chat.
  */
-function getTokenCacheObject() {
+function getCurrentCacheChatId() {
     let chatId = 'undefined';
 
     try {
@@ -906,11 +1091,25 @@ function getTokenCacheObject() {
         console.log('No character / group selected. Using default cache item');
     }
 
+    return String(chatId);
+}
+
+/**
+ * Gets the token cache object for the current chat.
+ * @returns {Object} Token cache object for the current chat.
+ */
+function getTokenCacheObject() {
+    const chatId = getCurrentCacheChatId();
+    // Reads count as usage: a chat that is only ever viewed keeps its shard.
+    // Persisted alongside the next flush, or on page hide at the latest.
+    tokenCacheMeta[chatId] = Date.now();
+    tokenCacheMetaDirty = true;
+
     if (typeof tokenCache[chatId] !== 'object') {
         tokenCache[chatId] = {};
     }
 
-    return tokenCache[String(chatId)];
+    return tokenCache[chatId];
 }
 
 /**
@@ -1229,6 +1428,14 @@ export async function initTokenizers() {
         }
     });
     await loadTokenCache();
+    // Idle-deferred cache writes could be lost on tab close; flush them as
+    // soon as the page goes to the background.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            flushTokenCacheNow();
+        }
+    });
+    window.addEventListener('pagehide', flushTokenCacheNow);
     registerDebugFunction('resetTokenCache', 'Reset token cache', 'Purges the calculated token counts. Use this if you want to force a full re-tokenization of all chats or suspect the token counts are wrong.', resetTokenCache);
 }
 
