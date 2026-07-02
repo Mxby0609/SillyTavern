@@ -10926,6 +10926,8 @@ export async function doNavbarIconClick() {
             $('#rm_print_characters_block').trigger('scroll');
         }
 
+        await eventSource.emit(event_types.NAVBAR_DRAWER_TOGGLED, { id: targetDrawerID, isOpen: true });
+
         // Set the height of "autoSetHeight" textareas within the drawer to their scroll height
         if (!CSS.supports('field-sizing', 'content')) {
             const textareas = $(this).closest('.drawer').find('.drawer-content textarea.autoSetHeight');
@@ -10936,6 +10938,8 @@ export async function doNavbarIconClick() {
     } else if (drawerWasOpenAlready) {
         icon.toggleClass('closedIcon openIcon');
         drawer.toggleClass('closedDrawer openDrawer');
+
+        await eventSource.emit(event_types.NAVBAR_DRAWER_TOGGLED, { id: targetDrawerID, isOpen: false });
     }
 }
 
