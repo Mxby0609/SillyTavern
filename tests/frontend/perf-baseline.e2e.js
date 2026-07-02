@@ -140,6 +140,9 @@ test.describe('Performance baseline', () => {
         await page.waitForTimeout(1000);
         results['save-chat'] = await collectMetrics(page);
 
+        // Deactivate the fixture lorebook so other suites are unaffected.
+        await runCommands(page, `/world silent=true state=off ${WORLD_NAME}`);
+
         console.log('===== PERF BASELINE REPORT =====');
         console.log(JSON.stringify(results, null, 2));
         console.log('================================');
