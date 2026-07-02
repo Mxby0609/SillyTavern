@@ -2099,6 +2099,9 @@ export async function loadWorldInfo(name) {
 
     if (response.ok) {
         const data = await response.json();
+        // No memo invalidation needed here: a fetch only fills a book that is not in
+        // the cache, and a memo can only exist for books that were all cached when it
+        // was stored - leaving the cache (deleteWorldInfo) already invalidates it.
         worldInfoCache.set(name, data);
         return data;
     }
@@ -4197,6 +4200,7 @@ export async function saveWorldInfo(name, data, immediately = false) {
 
     // Update cache immediately, so any future call can pull from this
     worldInfoCache.set(name, data);
+    invalidateSortedEntriesMemo();
 
     if (immediately) {
         return await _save(name, data);
@@ -4344,6 +4348,7 @@ export async function deleteWorldInfo(worldInfoName) {
 
     if (worldInfoCache.has(worldInfoName)) {
         worldInfoCache.delete(worldInfoName);
+        invalidateSortedEntriesMemo();
     }
 
     const existingWorldIndex = selected_world_info.findIndex((e) => e === worldInfoName);
@@ -4571,9 +4576,80 @@ async function getPersonaLore() {
     return entries;
 }
 
+/**
+ * Monotonic version of the world info book cache. Bumped whenever cached book
+ * data changes, so memoized sorted entries can never survive a book change.
+ */
+let worldInfoBooksVersion = 0;
+
+/** @type {{key: string, entries: object[]}|null} Memoized result of buildSortedEntries */
+let sortedEntriesMemo = null;
+
+/**
+ * Invalidates the memoized sorted entries after a book change.
+ */
+function invalidateSortedEntriesMemo() {
+    worldInfoBooksVersion++;
+    sortedEntriesMemo = null;
+}
+
+/**
+ * Builds a key of everything that determines the result of buildSortedEntries:
+ * the book cache version, the insertion strategy, and the applicable book names
+ * in resolution order. Any change in these produces a different key.
+ * @returns {string} The memo key
+ */
+function getSortedEntriesMemoKey() {
+    const fileName = getCharaFilename(this_chid);
+    const extraCharLore = world_info.charLore?.find((e) => e.name === fileName);
+    return JSON.stringify([
+        worldInfoBooksVersion,
+        Number(world_info_character_strategy),
+        selected_world_info,
+        chat_metadata[METADATA_KEY] || '',
+        power_user.persona_description_lorebook || '',
+        characters[this_chid]?.data?.extensions?.world || '',
+        extraCharLore?.extraBooks || [],
+    ]);
+}
+
+/**
+ * Collects the names of all books that buildSortedEntries would read.
+ * @returns {Set<string>} Names of the applicable books
+ */
+function getSortedEntriesBookNames() {
+    const names = new Set(selected_world_info);
+    if (chat_metadata[METADATA_KEY]) {
+        names.add(chat_metadata[METADATA_KEY]);
+    }
+    if (power_user.persona_description_lorebook) {
+        names.add(power_user.persona_description_lorebook);
+    }
+    const baseWorldName = characters[this_chid]?.data?.extensions?.world;
+    if (baseWorldName) {
+        names.add(baseWorldName);
+    }
+    const fileName = getCharaFilename(this_chid);
+    const extraCharLore = world_info.charLore?.find((e) => e.name === fileName);
+    for (const book of extraCharLore?.extraBooks ?? []) {
+        names.add(book);
+    }
+    return names;
+}
+
 export async function getSortedEntries() {
     try {
+        // Extensions listening for this event expect it on every call - keep the legacy path for them.
+        const hasEntriesLoadedListeners = !!eventSource.events[event_types.WORLDINFO_ENTRIES_LOADED]?.length;
+        const memoKey = hasEntriesLoadedListeners ? null : getSortedEntriesMemoKey();
+        if (memoKey && sortedEntriesMemo?.key === memoKey) {
+            return sortedEntriesMemo.entries.map((entry) => ({ ...entry }));
+        }
         const entries = await buildSortedEntries();
+        // Only memoize when every book was served from the cache: a failed book load
+        // is not cached and must stay retryable on the next call, like before.
+        const allBooksCached = memoKey && [...getSortedEntriesBookNames()].every((name) => worldInfoCache.has(name));
+        sortedEntriesMemo = allBooksCached ? { key: memoKey, entries } : null;
         // Hand out call-local entry objects: the scan path replaces top-level fields
         // (macro substitution writes entry.content) and that must never leak into
         // shared data. Nested objects (keys, decorators, ...) must not be mutated.
