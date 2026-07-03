@@ -101,11 +101,20 @@ test.describe('Chat save serializer', () => {
 
         const state = await page.evaluate(async () => {
             const { chat, saveChat } = await import('/script.js');
+            const { setRequestCompressionConfig, getRequestCompressionConfig } = await import('/scripts/request-compression.js');
             const context = globalThis.SillyTavern.getContext();
             if (context.characterId === undefined && context.characters.length) {
                 await context.executeSlashCommandsWithOptions(`/go ${context.characters[0].name}`);
             }
-            await saveChat();
+            // Force compression on (default config ships disabled) so this
+            // test exercises the gzip body + Content-Encoding wiring.
+            const previousConfig = getRequestCompressionConfig();
+            setRequestCompressionConfig({ enabled: true, minPayloadSize: 0, maxPayloadSize: 0, timeout: 5000 });
+            try {
+                await saveChat();
+            } finally {
+                setRequestCompressionConfig(previousConfig);
+            }
             return {
                 chatLength: chat.length,
                 lastMes: chat.length ? String(chat[chat.length - 1].mes) : null,
