@@ -242,9 +242,39 @@ test.describe('Incremental chat saves', () => {
             expect(growthChat.some(line => line.mes === 'silently pushed'), 'the unrecorded push reached the disk').toBe(true);
             expect(growthChat[growthChat.length - 1].mes, 'the recorded send is the last line').toBe('append after silent push');
 
+            // In-tree middle insert (/sys at=): poisoned at the mutation —
+            // and disk must mirror memory exactly (a shifted middle would
+            // be corruption, not just delayed persistence).
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const context = globalThis.SillyTavern.getContext();
+                await context.executeSlashCommandsWithOptions('/sys at=1 wedged narrator note');
+            });
+            expect(traffic.filter(t => t.kind === 'delta').length, 'no delta for a middle narrator insert').toBe(0);
+            let insertChat = await fetchServerChat(page, info);
+            expect(insertChat[2].mes, 'the inserted line sits at its index on disk').toBe('wedged narrator note');
+
+            // Extension-style middle insert: direct splice + DIRECT saveChat
+            // import (bypasses both the poison sites and the context
+            // wrapper). The record-count guard must force a full save.
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const { chat, saveChat } = await import('/script.js');
+                chat.splice(1, 0, { name: 'Ghost', is_user: false, is_system: true, mes: 'wedged by an extension', extra: {} });
+                await saveChat();
+            });
+            expect(traffic.filter(t => t.kind === 'delta').length, 'no delta for an unrecorded middle insert').toBe(0);
+            expect(traffic.filter(t => t.kind === 'raw').length, 'the unrecorded insert full-saved').toBe(1);
+            insertChat = await fetchServerChat(page, info);
+            expect(insertChat[2].mes, 'the extension-inserted line sits at its index on disk').toBe('wedged by an extension');
+
             const serverChat = await fetchServerChat(page, info);
-            const clientLength = await page.evaluate(async () => (await import('/script.js')).chat.length);
-            expect(serverChat.length - 1, 'server matches memory after all fallbacks').toBe(clientLength);
+            const clientState = await page.evaluate(async () => {
+                const { chat } = await import('/script.js');
+                return { length: chat.length, mesList: chat.map(x => x.mes) };
+            });
+            expect(serverChat.length - 1, 'server matches memory after all fallbacks').toBe(clientState.length);
+            expect(serverChat.slice(1).map(x => x.mes), 'disk row order mirrors memory exactly').toEqual(clientState.mesList);
         } finally {
             await deleteThrowawayChat(page, info);
         }
@@ -356,6 +386,17 @@ test.describe('Incremental chat saves', () => {
             serverChat = await fetchServerChat(page, info);
             const autoCaptioned = serverChat[serverChat.length - 1].extra?.media?.[0];
             expect(autoCaptioned?.title ?? '', 'the auto caption reached the disk on the next save').toContain('auto caption 自动');
+
+            // /message-role: a same-length slash mutation of message 0.
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const context = globalThis.SillyTavern.getContext();
+                await context.executeSlashCommandsWithOptions('/message-role at=0 system');
+            });
+            expect(traffic.length > 0, 'the role change was not treated as a noop').toBe(true);
+            serverChat = await fetchServerChat(page, info);
+            expect(serverChat[1].is_user, 'the role change reached the disk').toBe(false);
+            expect(serverChat[1].extra?.type, 'the narrator marker reached the disk').toBeTruthy();
         } finally {
             await deleteThrowawayChat(page, info);
         }

@@ -224,11 +224,14 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
             appendedIndexes.delete(index);
         }
     }
-    // No per-position record check is needed for the tail: the append ops
-    // below serialize EVERY position in [baseMessageCount, chatLength)
-    // fresh from chat[], so an unrecorded push inside the appended window
-    // still reaches the disk correctly. The records exist for the epoch
-    // logic above — proving no unrecorded SHRINK repositioned the tail.
+    // The record COUNT must match the growth. An unrecorded GROWTH from an
+    // unknown writer is not append-shaped in general — a middle INSERT
+    // shifts every following row, and serializing only the tail would
+    // write a shifted-stale middle to disk (real corruption, not merely
+    // delayed persistence). Count equality forces those to a full save.
+    // (No per-position check is needed beyond this: append ops serialize
+    // every position in [baseMessageCount, chatLength) fresh from chat[].)
+    if (appendedIndexes.size !== appendCount) return null;
     // Same pre-arm/post-arm split for touches that point past the end.
     for (const [index, epoch] of [...touchedIndexes]) {
         if (!Number.isInteger(index) || index < 0) return null;
