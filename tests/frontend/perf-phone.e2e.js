@@ -170,13 +170,15 @@ test.describe('Phone-emulation performance', () => {
         // context after 10 and after 40 generated replies. ---
         for (const entryCount of [10, 40]) {
             await page.evaluate(async (count) => {
-                const { itemizedPrompts } = await import('/scripts/itemized-prompts.js');
+                const { itemizedPrompts, upsertItemizedPrompt } = await import('/scripts/itemized-prompts.js');
                 itemizedPrompts.splice(0);
                 for (let i = 0; i < count; i++) {
                     // ~1.2M chars of prompt content per entry — what one
-                    // 300k-token chat-completion prompt carries.
+                    // 300k-token chat-completion prompt carries. Recorded
+                    // through the same upsert entry point generations use
+                    // (it marks the store dirty).
                     const filler = (`entry${i} the ancient walls whispered secrets of forgotten ages `).repeat(20000);
-                    itemizedPrompts.push({
+                    upsertItemizedPrompt({
                         mesId: 100000 + i,
                         rawPrompt: [
                             { role: 'system', content: filler.slice(0, 200000) },
@@ -197,6 +199,16 @@ test.describe('Phone-emulation performance', () => {
             });
             await waitForMeasure(page, 'itemized-save', MEASURE_TIMEOUT_MS);
             results[`save-chat-itemized-${entryCount}`] = await collectMeters(page, wallMs);
+
+            // Same store, nothing changed since the write above: the dirty
+            // flag must skip the whole-array rewrite on this save.
+            await resetMeters(page);
+            wallMs = await timeEvaluate(page, async () => {
+                const { saveChatConditional } = await import('/script.js');
+                await saveChatConditional();
+            });
+            await page.waitForTimeout(SETTLE_MS);
+            results[`save-chat-itemized-${entryCount}-clean`] = await collectMeters(page, wallMs);
         }
 
         // Drop the synthetic itemized entries from memory and storage.

@@ -17,6 +17,51 @@ const promptStorage = localforage.createInstance({ name: 'SillyTavern_Prompts' }
 export let itemizedPrompts = [];
 
 /**
+ * Whether the in-memory array diverged from what was last written to
+ * storage. saveItemizedPrompts persists the WHOLE array on every chat
+ * save; with the flag, unchanged arrays (swipe taps, metadata saves) skip
+ * the rewrite entirely. Claimed false BEFORE the write starts so a
+ * mutation landing while a write is in flight keeps the array dirty for
+ * the next save; restored to true when a write fails.
+ *
+ * The flag describes the array's relation to ITS OWN chat's storage key
+ * (loadedChatId). Bookmarks/branches reuse saveItemizedPrompts with a
+ * DIFFERENT chatId to copy the array under a new key — those copies
+ * always write and never touch the flag.
+ */
+let itemizedPromptsDirty = false;
+
+/** @type {string|null} Chat id the in-memory array was loaded for. */
+let loadedChatId = null;
+
+/**
+ * Marks the itemized prompts as changed since the last successful write.
+ * Internal: every mutating function in this module calls it; external
+ * writers go through upsertItemizedPrompt so mutation and marking stay
+ * atomic in one place.
+ */
+function markItemizedPromptsDirty() {
+    itemizedPromptsDirty = true;
+}
+
+/**
+ * Inserts or replaces the itemized prompt for a message and marks the
+ * store dirty — the single entry point for generation-time recording.
+ * @param {object} entry Itemized prompt entry (keyed by entry.mesId)
+ */
+export function upsertItemizedPrompt(entry) {
+    const index = itemizedPrompts.findIndex((item) => item.mesId === entry.mesId);
+
+    if (index !== -1) {
+        itemizedPrompts[index] = entry;
+    } else {
+        itemizedPrompts.push(entry);
+    }
+
+    markItemizedPromptsDirty();
+}
+
+/**
  * Gets the itemized prompts for a chat.
  * @param {string} chatId Chat ID to load
  */
@@ -24,6 +69,8 @@ export async function loadItemizedPrompts(chatId) {
     try {
         if (!chatId) {
             itemizedPrompts = [];
+            itemizedPromptsDirty = false;
+            loadedChatId = null;
             return;
         }
 
@@ -33,10 +80,16 @@ export async function loadItemizedPrompts(chatId) {
             itemizedPrompts = [];
         }
 
+        // Fresh from storage: memory and storage agree.
+        itemizedPromptsDirty = false;
+        loadedChatId = chatId;
+
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_LOADED, { chatId: chatId });
     } catch {
         console.log('Error loading itemized prompts for chat', chatId);
         itemizedPrompts = [];
+        itemizedPromptsDirty = false;
+        loadedChatId = chatId;
     }
 }
 
@@ -45,16 +98,34 @@ export async function loadItemizedPrompts(chatId) {
  * @param {string} chatId Chat ID to save itemized prompts for
  */
 export async function saveItemizedPrompts(chatId) {
-    try {
-        if (!chatId) {
-            return;
-        }
+    if (!chatId) {
+        return;
+    }
 
+    // The dirty flag only describes the array's own chat. A save under a
+    // DIFFERENT key is a copy (bookmarks/branches): it always writes and
+    // must not claim or clear the flag.
+    const isOwnChat = chatId === loadedChatId;
+
+    if (isOwnChat && !itemizedPromptsDirty) {
+        return;
+    }
+
+    if (isOwnChat) {
+        // Claim before the write: a mutation arriving while setItem is in
+        // flight re-marks dirty and the NEXT save writes it.
+        itemizedPromptsDirty = false;
+    }
+
+    try {
         perfMark('itemized-save:start');
         await promptStorage.setItem(chatId, itemizedPrompts);
         perfMeasure('itemized-save', 'itemized-save:start');
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_SAVED, { chatId: chatId });
     } catch {
+        if (isOwnChat) {
+            itemizedPromptsDirty = true;
+        }
         console.log('Error saving itemized prompts for chat', chatId);
     }
 }
@@ -77,6 +148,7 @@ export async function replaceItemizedPromptText(mesId, promptText) {
     }
 
     itemizedPrompt.rawPrompt = promptText;
+    markItemizedPromptsDirty();
 }
 
 /**
@@ -103,6 +175,8 @@ export async function clearItemizedPrompts() {
     try {
         await promptStorage.clear();
         itemizedPrompts = [];
+        // Memory and storage agree again (both empty).
+        itemizedPromptsDirty = false;
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_DELETED, { all: true });
     } catch {
         console.log('Error clearing itemized prompts');
@@ -382,6 +456,10 @@ export function swapItemizedPrompts(sourceMessageId, targetMessageId) {
     });
 
     itemizedPrompts.sort((a, b) => a.mesId - b.mesId);
+
+    if (sourcePrompts.length || targetPrompts.length) {
+        markItemizedPromptsDirty();
+    }
 }
 
 /**
@@ -394,9 +472,16 @@ export function deleteItemizedPromptForMessage(messageId) {
         return;
     }
 
+    const sizeBefore = itemizedPrompts.length;
     itemizedPrompts = itemizedPrompts.filter(x => x.mesId !== messageId);
 
+    let shifted = false;
     for (const prompt of itemizedPrompts.filter(x => x.mesId > messageId)) {
         prompt.mesId -= 1;
+        shifted = true;
+    }
+
+    if (shifted || itemizedPrompts.length !== sizeBefore) {
+        markItemizedPromptsDirty();
     }
 }
