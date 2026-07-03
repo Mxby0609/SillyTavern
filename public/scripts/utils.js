@@ -1462,8 +1462,12 @@ export class Stopwatch {
  * is not evidence of overload.
  */
 export class AdaptiveStopwatch extends Stopwatch {
+    // Headroom 2.0 targets <=50% main-thread occupancy from streaming
+    // renders on any device speed: interval = observed render cost x2, so
+    // at least half the thread stays free for input. The user's configured
+    // rate remains the ceiling (interval never drops below base).
     static MAX_INTERVAL_MS = 250;
-    static HEADROOM_FACTOR = 1.5;
+    static HEADROOM_FACTOR = 2.0;
     static EMA_WEIGHT = 0.4;
 
     /**
