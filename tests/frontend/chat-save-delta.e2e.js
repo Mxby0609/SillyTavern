@@ -397,6 +397,27 @@ test.describe('Incremental chat saves', () => {
             serverChat = await fetchServerChat(page, info);
             expect(serverChat[1].is_user, 'the role change reached the disk').toBe(false);
             expect(serverChat[1].extra?.type, 'the narrator marker reached the disk').toBeTruthy();
+
+            // /checkpoint-create writes bookmark_link onto the message in
+            // place (the checkpoint FILE itself is an alternate-key copy).
+            const checkpointName = `e2e-checkpoint-${Date.now().toString(36)}`;
+            await page.evaluate(async (name) => {
+                const context = globalThis.SillyTavern.getContext();
+                await context.executeSlashCommandsWithOptions(`/checkpoint-create mesId=0 ${name}`);
+            }, checkpointName);
+            serverChat = await fetchServerChat(page, info);
+            expect(serverChat[1].extra?.bookmark_link ?? '', 'the checkpoint link reached the disk').toContain(checkpointName);
+            // Remove the checkpoint file the command created.
+            await page.evaluate(async (name) => {
+                const { getRequestHeaders } = await import('/script.js');
+                const context = globalThis.SillyTavern.getContext();
+                const avatar = context.characters[context.characterId].avatar;
+                await fetch('/api/chats/delete', {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify({ chatfile: `${name}.jsonl`, avatar_url: avatar }),
+                });
+            }, checkpointName);
         } finally {
             await deleteThrowawayChat(page, info);
         }
