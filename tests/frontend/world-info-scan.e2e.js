@@ -208,6 +208,49 @@ test.describe('World info scan equivalence', () => {
         expect(fresh).toBe('PRISTINE_CONTENT');
     });
 
+    test('chat change evicts unrelated cached books, keeps relevant ones', async ({ page }) => {
+        const bookKeep = `e2e-wi-${SALT}-evkeep`;
+        const bookDrop = `e2e-wi-${SALT}-evdrop`;
+        const bookEditor = `e2e-wi-${SALT}-eveditor`;
+        const results = await page.evaluate(async ({ bookKeep, bookDrop, bookEditor, SALT }) => {
+            const wi = await import('/scripts/world-info.js');
+            const $ = globalThis.jQuery;
+            try {
+                await window.__wiTest.makeBook(bookKeep, [{ key: [`evictprobe${SALT}`], content: 'KEEP_HIT' }]);
+                await window.__wiTest.makeBook(bookDrop, [{ key: [`evictprobe${SALT}`], content: 'DROP_HIT' }]);
+                await window.__wiTest.makeBook(bookEditor, [{ key: [`evictprobe${SALT}`], content: 'EDITOR_HIT' }]);
+                await window.__wiTest.setChatBook(bookKeep);
+                await wi.loadWorldInfo(bookDrop);
+                await wi.loadWorldInfo(bookEditor);
+                const before = {
+                    keep: wi.worldInfoCache.has(bookKeep),
+                    drop: wi.worldInfoCache.has(bookDrop),
+                    editor: wi.worldInfoCache.has(bookEditor),
+                };
+
+                // Mark the third book as open in the editor.
+                $('#world_editor_select').append(new Option(bookEditor, 'e2e-evict-probe', true, true));
+
+                wi.evictUnusedWorldInfoCacheBooks();
+                const after = {
+                    keep: wi.worldInfoCache.has(bookKeep),
+                    drop: wi.worldInfoCache.has(bookDrop),
+                    editor: wi.worldInfoCache.has(bookEditor),
+                };
+
+                // Eviction is only a cache drop: the book reloads intact.
+                const reloaded = await wi.loadWorldInfo(bookDrop);
+                return { before, after, reloadedContent: reloaded?.entries?.[0]?.content };
+            } finally {
+                $('#world_editor_select option[value="e2e-evict-probe"]').remove();
+            }
+        }, { bookKeep, bookDrop, bookEditor, SALT });
+
+        expect(results.before, 'all three books start cached').toEqual({ keep: true, drop: true, editor: true });
+        expect(results.after, 'chat and editor books kept, unrelated book dropped').toEqual({ keep: true, drop: false, editor: true });
+        expect(results.reloadedContent, 'evicted book reloads from the server').toBe('DROP_HIT');
+    });
+
     test('memoization serves warm scans and yields to entries-loaded listeners', async ({ page }) => {
         test.setTimeout(60000);
         const book = `e2e-wi-${SALT}-memo`;
