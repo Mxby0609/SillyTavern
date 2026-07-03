@@ -1,6 +1,7 @@
 import { ensureImageFormatSupported, getBase64Async, getFileExtension, isTrueBoolean, saveBase64AsFile } from '../../utils.js';
 import { getContext, getApiUrl, doExtrasFetch, extension_settings, modules, renderExtensionTemplateAsync } from '../../extensions.js';
 import { appendMediaToMessage, chat_metadata, eventSource, event_types, getRequestHeaders, saveChatConditional, saveSettingsDebounced, substituteParams } from '../../../script.js';
+import { recordChatTouch } from '../../chat-save-ledger.js';
 import { getMessageTimeStamp } from '../../RossAscends-mods.js';
 import { SECRET_KEYS, secret_state } from '../../secrets.js';
 import { oai_settings } from '../../openai.js';
@@ -734,6 +735,11 @@ export async function init() {
                 }
                 try {
                     await captionExistingMessage(message, mediaIndex);
+                    // MESSAGE_SENT fires AFTER the message was saved, so
+                    // this mutation sits below the ledger's acknowledged
+                    // base — without the touch the caption would wait for
+                    // a reconciliation full save instead of the next save.
+                    recordChatTouch(messageId);
                 } catch (e) {
                     console.error(`Auto-captioning failed for message ID ${messageId}, media index ${mediaIndex}`, e);
                     continue;
@@ -758,6 +764,10 @@ export async function init() {
             const data = getContext().chat[messageId];
             await captionExistingMessage(data, mediaIndex);
             appendMediaToMessage(data, messageBlock, SCROLL_BEHAVIOR.KEEP);
+            // Same-length in-place mutation + a DIRECT saveChatConditional
+            // import: without the touch the delta ledger would treat this
+            // save as a noop and the caption would never reach the disk.
+            recordChatTouch(messageId);
             await saveChatConditional();
         } catch (e) {
             console.error('Message image recaption failed', e);

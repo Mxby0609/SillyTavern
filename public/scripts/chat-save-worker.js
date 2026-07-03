@@ -1,15 +1,21 @@
 /**
- * Chat-save serialization worker: JSON.stringify + UTF-8 encode + optional
- * gzip, off the main thread. Deliberately dependency-free — the lib.js
- * bundle may touch window/document at import time, so compression uses the
- * native CompressionStream (available in all Chromium/WebKit/Gecko versions
- * SillyTavern supports); when unavailable the plain bytes are returned and
- * the request goes out uncompressed, exactly like a disabled-compression
- * config today.
+ * Chat-save serialization worker: per-message JSON.stringify into JSONL +
+ * UTF-8 encode + optional gzip, off the main thread. Deliberately
+ * dependency-free — the lib.js bundle may touch window/document at import
+ * time, so compression uses the native CompressionStream (available in all
+ * Chromium/WebKit/Gecko versions SillyTavern supports); when unavailable
+ * the plain bytes are returned and the request goes out uncompressed,
+ * exactly like a disabled-compression config today.
  *
- * Message in:  { id, payload, compression: { enabled, minPayloadSize,
- *                maxPayloadSize, timeout } }
- * Message out: { id, ok: true, body: Uint8Array, gzip: boolean }
+ * The output is the chat FILE content itself (for /api/chats/save-raw):
+ * headerLine + '\n' + one JSON line per message, single-newline separators,
+ * no trailing newline. rawByteLength/rawLineCount describe the UNCOMPRESSED
+ * bytes — the client's delta ledger uses them as its acknowledged base.
+ *
+ * Message in:  { id, headerLine: string, messages: object[], compression:
+ *                { enabled, minPayloadSize, maxPayloadSize, timeout } }
+ * Message out: { id, ok: true, body: Uint8Array, gzip: boolean,
+ *                rawByteLength: number, rawLineCount: number }
  *              (body transferred, zero-copy) or { id, ok: false, error }
  */
 
@@ -51,10 +57,18 @@ async function gzipBytesWithTimeout(bytes, timeoutMs) {
 }
 
 self.addEventListener('message', async (event) => {
-    const { id, payload, compression } = event.data;
+    const { id, headerLine, messages, compression } = event.data;
     try {
-        const json = JSON.stringify(payload);
-        const bytes = new TextEncoder().encode(json);
+        if (typeof headerLine !== 'string' || !Array.isArray(messages)) {
+            throw new Error('Malformed serialization request');
+        }
+        let jsonl = headerLine;
+        for (const message of messages) {
+            jsonl += '\n' + JSON.stringify(message);
+        }
+        const bytes = new TextEncoder().encode(jsonl);
+        const rawByteLength = bytes.byteLength;
+        const rawLineCount = 1 + messages.length;
 
         let body = bytes;
         let gzip = false;
@@ -77,7 +91,7 @@ self.addEventListener('message', async (event) => {
             }
         }
 
-        self.postMessage({ id, ok: true, body, gzip }, [body.buffer]);
+        self.postMessage({ id, ok: true, body, gzip, rawByteLength, rawLineCount }, [body.buffer]);
     } catch (error) {
         self.postMessage({ id, ok: false, error: String(error instanceof Error ? error.message : error) });
     }

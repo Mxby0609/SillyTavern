@@ -99,6 +99,7 @@ import { t } from './i18n.js';
 import { kai_settings } from './kai-settings.js';
 import { instruct_presets, selectContextPreset, selectInstructPreset } from './instruct-mode.js';
 import { debounce_timeout, SWIPE_DIRECTION, SWIPE_SOURCE } from './constants.js';
+import { poisonChatSaveLedger, recordChatAppend, recordChatTouch } from './chat-save-ledger.js';
 export {
     executeSlashCommands, executeSlashCommandsWithOptions, getSlashCommandsHelp, registerSlashCommand,
 };
@@ -4646,6 +4647,7 @@ async function addSwipeCallback(args, value) {
         lastMessage.swipe_info = lastMessage.swipes.map(() => ({}));
     }
 
+    recordChatTouch(chat.length - 1);
     lastMessage.swipes.push(value);
     lastMessage.swipe_info.push({
         send_date: getMessageTimeStamp(),
@@ -5066,6 +5068,7 @@ async function deleteMessagesByNameCallback(_, name) {
         return;
     }
 
+    poisonChatSaveLedger('slash-delete-messages');
     for (const message of messagesToDelete) {
         const index = chat.indexOf(message);
         if (index !== -1) {
@@ -5854,6 +5857,7 @@ async function messageRoleCallback(args, role) {
         existingMessage.remove();
     }
     await eventSource.emit(event_types.MESSAGE_UPDATED, modifyAt);
+    recordChatTouch(modifyAt);
     await saveChatConditional();
 
     return role;
@@ -5920,6 +5924,7 @@ async function messageNameCallback(args, name) {
         existingMessage.remove();
     }
     await eventSource.emit(event_types.MESSAGE_UPDATED, modifyAt);
+    recordChatTouch(modifyAt);
     await saveChatConditional();
 
     return newName;
@@ -6000,6 +6005,7 @@ export async function sendMessageAs(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
+        poisonChatSaveLedger('slash-message-insert');
         chat.splice(insertAt, 0, message);
         await saveChatConditional();
         await eventSource.emit(event_types.MESSAGE_RECEIVED, insertAt, 'command');
@@ -6007,6 +6013,7 @@ export async function sendMessageAs(args, text) {
         await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, insertAt, 'command');
     } else {
         chat.push(message);
+        recordChatAppend(chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_RECEIVED, (chat.length - 1), 'command');
         addOneMessage(message);
         await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, (chat.length - 1), 'command');
@@ -6052,6 +6059,7 @@ export async function sendNarratorMessage(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
+        poisonChatSaveLedger('slash-message-insert');
         chat.splice(insertAt, 0, message);
         await saveChatConditional();
         await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
@@ -6059,6 +6067,7 @@ export async function sendNarratorMessage(args, text) {
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
         chat.push(message);
+        recordChatAppend(chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, (chat.length - 1));
         addOneMessage(message);
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, (chat.length - 1));
@@ -6138,6 +6147,7 @@ async function sendCommentMessage(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
+        poisonChatSaveLedger('slash-message-insert');
         chat.splice(insertAt, 0, message);
         await saveChatConditional();
         await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
@@ -6145,6 +6155,7 @@ async function sendCommentMessage(args, text) {
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
         chat.push(message);
+        recordChatAppend(chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, (chat.length - 1));
         addOneMessage(message);
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, (chat.length - 1));

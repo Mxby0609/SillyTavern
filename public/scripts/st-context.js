@@ -82,6 +82,7 @@ import {
     writeExtensionFieldBulk,
 } from './extensions.js';
 import { groups, openGroupChat, selected_group, unshallowGroupMembers } from './group-chats.js';
+import { poisonChatSaveLedger } from './chat-save-ledger.js';
 import { addLocaleData, getCurrentLocale, t, translate } from './i18n.js';
 import { hideLoader, showLoader } from './loader.js';
 import { loader } from './action-loader.js';
@@ -151,7 +152,13 @@ export function getContext() {
         extensionPrompts: extension_prompts,
         setExtensionPrompt,
         updateChatMetadata,
-        saveChat: saveChatConditional,
+        // Extensions can mutate chat[] in place before calling this; the
+        // save ledger cannot see those writes, so extension-origin saves
+        // fail closed to a FULL save.
+        saveChat: () => {
+            poisonChatSaveLedger('context-save');
+            return saveChatConditional();
+        },
         openCharacterChat,
         openGroupChat,
         saveMetadata,

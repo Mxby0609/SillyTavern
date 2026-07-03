@@ -19,7 +19,7 @@ test.describe('Streaming render', () => {
     test.beforeEach(async ({ page }) => {
         await testSetup.awaitST({ page });
         // Keep test state out of the user's persisted chats and settings.
-        for (const url of ['**/api/chats/save', '**/api/chats/group/save', '**/api/settings/save']) {
+        for (const url of ['**/api/chats/save', '**/api/chats/save-raw*', '**/api/chats/save-delta', '**/api/chats/group/save', '**/api/settings/save']) {
             await page.route(url, route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"result":"ok"}' }));
         }
     });

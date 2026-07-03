@@ -1,13 +1,19 @@
 import { getRequestCompressionConfig } from './request-compression.js';
 
 /**
- * Off-main-thread serializer for chat-save payloads (unit R2.2b).
+ * Off-main-thread serializer for chat-save payloads (unit R2.2b; JSONL
+ * contract since R3.2 — the worker now produces the chat FILE bytes for
+ * /api/chats/save-raw and reports their uncompressed size/line count so
+ * the delta ledger can arm on them).
  *
- * The main thread hands the payload object to a dedicated worker via
- * structured clone (a few ms even for multi-MB chats) and receives the
- * finished request body back as a transferred Uint8Array (zero-copy). The
- * JSON.stringify + UTF-8 encode + gzip that used to freeze the UI for the
- * duration of the save happen in the worker.
+ * The main thread hands the message array to a dedicated worker via
+ * structured clone and receives the finished request body back as a
+ * transferred Uint8Array (zero-copy). The per-message JSON.stringify +
+ * UTF-8 encode + gzip that used to freeze the UI for the duration of the
+ * save happen in the worker. NOTE: at multi-MB chat sizes the structured
+ * clone itself is the dominant remaining main-thread cost of a FULL save —
+ * which is why hot actions go through the delta ledger and skip this
+ * entirely.
  *
  * Scope (per plan review): serialization and compression ONLY. Fetch,
  * request headers/CSRF, and the save-integrity flow stay in saveChat on
@@ -29,7 +35,8 @@ const SERIALIZE_TIMEOUT_MS = 10000;
 let worker = null;
 let workerBroken = false;
 let nextRequestId = 0;
-/** @type {Map<number, { resolve: (value: {body: Uint8Array, gzip: boolean}) => void, reject: (reason: Error) => void }>} */
+/** @typedef {{body: Uint8Array, gzip: boolean, rawByteLength: number, rawLineCount: number}} SerializedChatSave */
+/** @type {Map<number, { resolve: (value: SerializedChatSave) => void, reject: (reason: Error) => void }>} */
 const pendingRequests = new Map();
 
 function rejectAllPending(reason) {
@@ -50,14 +57,14 @@ function getWorker() {
     try {
         worker = new Worker(new URL('./chat-save-worker.js', import.meta.url), { type: 'module' });
         worker.addEventListener('message', (event) => {
-            const { id, ok, body, gzip, error } = event.data ?? {};
+            const { id, ok, body, gzip, rawByteLength, rawLineCount, error } = event.data ?? {};
             const entry = pendingRequests.get(id);
             if (!entry) {
                 return;
             }
             pendingRequests.delete(id);
-            if (ok && body instanceof Uint8Array) {
-                entry.resolve({ body, gzip: Boolean(gzip) });
+            if (ok && body instanceof Uint8Array && Number.isInteger(rawByteLength) && Number.isInteger(rawLineCount)) {
+                entry.resolve({ body, gzip: Boolean(gzip), rawByteLength, rawLineCount });
             } else {
                 entry.reject(new Error(error || 'Malformed worker reply'));
             }
@@ -78,26 +85,29 @@ function getWorker() {
 }
 
 /**
- * Serializes (and, per server config, compresses) a chat-save payload off
+ * Serializes (and, per server config, compresses) chat file content off
  * the main thread.
- * @param {object} payload JSON-serializable request payload
- * @returns {Promise<{body: Uint8Array, gzip: boolean}|null>} The finished
- * request body, or null when the caller must use the inline fallback path.
+ * @param {object} payload Save content
+ * @param {string} payload.headerLine Pre-serialized header line (line 0)
+ * @param {object[]} payload.messages Message objects to serialize as JSONL lines
+ * @returns {Promise<SerializedChatSave|null>} The finished request body and
+ * its uncompressed size/line count, or null when the caller must use the
+ * inline fallback path.
  */
-export async function serializeChatSaveOffThread(payload) {
+export async function serializeChatSaveOffThread({ headerLine, messages }) {
     const activeWorker = getWorker();
     if (!activeWorker) {
         return null;
     }
 
     const id = nextRequestId++;
-    /** @type {Promise<{body: Uint8Array, gzip: boolean}>} */
+    /** @type {Promise<SerializedChatSave>} */
     const reply = new Promise((resolve, reject) => {
         pendingRequests.set(id, { resolve, reject });
     });
 
     try {
-        activeWorker.postMessage({ id, payload, compression: getRequestCompressionConfig() });
+        activeWorker.postMessage({ id, headerLine, messages, compression: getRequestCompressionConfig() });
     } catch (error) {
         // Structured clone refused the payload — inline path handles it.
         pendingRequests.delete(id);

@@ -22,6 +22,7 @@ import {
     setUserName,
     this_chid,
 } from '../script.js';
+import { poisonChatSaveLedger } from './chat-save-ledger.js';
 import { power_user } from './power-user.js';
 import { getTokenCountAsync } from './tokenizers.js';
 import {
@@ -1857,6 +1858,8 @@ async function syncUserNameToPersona({ start = 0, end = chat.length - 1, quiet =
         }
     }
 
+    // Bulk in-place rewrite of user messages — full save, not per-line deltas.
+    poisonChatSaveLedger('persona-migration');
     for (let i = start; i <= end; i++) {
         const mes = chat[i];
         if (mes?.is_user && (!hasNameFilter || equalsIgnoreCaseAndAccents(mes.name, nameFilter))) {

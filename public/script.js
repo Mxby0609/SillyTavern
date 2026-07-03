@@ -287,6 +287,7 @@ import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
 import { serializeChatSaveOffThread } from './scripts/chat-save-serializer.js';
+import { ackChatDeltaSave, armChatSaveLedger, beginFullSaveSnapshot, buildChatDeltaRequest, markChatSaveDeltaUnsupported, poisonChatSaveLedger, recordChatAppend, recordChatTouch } from './scripts/chat-save-ledger.js';
 import { perfMark, perfMeasure, perfAccum, perfNow } from './scripts/perf-metrics.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
@@ -1603,6 +1604,7 @@ export async function clearChat({ clearData = false } = {}) {
     await saveItemizedPrompts(getCurrentChatId());
     itemizedPrompts.length = 0;
 
+    poisonChatSaveLedger('chat-cleared');
     if (clearData) chat.length = 0;
 }
 
@@ -1657,6 +1659,7 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
         return;
     }
 
+    poisonChatSaveLedger('message-delete');
     chat.splice(id, 1);
     messageElement.remove();
 
@@ -3786,6 +3789,9 @@ export class StreamingProcessor {
         if (!isAborted && power_user.auto_swipe && generatedTextFiltered(text)) {
             return await swipe(null, SWIPE_DIRECTION.RIGHT, { source: SWIPE_SOURCE.AUTO_SWIPE, repeated: true, forceMesId: chat.length - 1 });
         }
+        // The streamed ticks mutated this message after its append was
+        // recorded (and possibly after a mid-stream save acked it).
+        recordChatTouch(messageId);
         await saveChatConditional();
 
         playMessageSound();
@@ -5906,6 +5912,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
     chat_metadata.tainted = true;
 
     if (typeof insertAt === 'number' && insertAt >= 0 && insertAt <= chat.length) {
+        poisonChatSaveLedger('user-message-insert');
         chat.splice(insertAt, 0, message);
         await saveChatConditional();
         await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
@@ -5913,6 +5920,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
         chat.push(message);
+        recordChatAppend(chat.length - 1);
         await saveChatConditional();
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, chat_id);
@@ -6648,6 +6656,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
     }
 
     const lastMessage = chat[chat.length - 1];
+    const chatLengthAtEntry = chat.length;
 
     if (type != 'append' && type != 'continue' && type != 'appendFinal' && chat.length && (lastMessage.swipe_id === undefined ||
         lastMessage.is_user)) {
@@ -6825,6 +6834,10 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         item.swipes.push(...swipes);
         item.swipe_info.push(...swipeInfoArray);
     }
+
+    // Save ledger: every branch above either pushed exactly one message or
+    // mutated the last one in place (incl. the streaming placeholder).
+    (chat.length > chatLengthAtEntry ? recordChatAppend : recordChatTouch)(chat.length - 1);
 
     statMesProcess(item, type, characters, this_chid, oldMessage);
     return { type, getMessage };
@@ -7095,6 +7108,7 @@ export function resetChatState() {
     //unsets expected chid before reloading (related to getCharacters/printCharacters from using old arrays)
     setCharacterId(undefined);
     // sets up system user to tell user about having deleted a character
+    poisonChatSaveLedger('chat-state-reset');
     chat.splice(0, chat.length, ...SAFETY_CHAT);
     // resets chat metadata
     chat_metadata = {};
@@ -7424,6 +7438,9 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
         : (mesId !== undefined && mesId >= 0 && mesId < chat.length)
             ? chat.slice(0, Number(mesId) + 1)
             : chat.slice();
+    // Snapshot moment: unarmed records arriving after this point are not
+    // in trimmedChat and must invalidate this save's arm token.
+    const snapshotToken = beginFullSaveSnapshot();
 
     /** @type {ChatHeader} */
     const chatHeader = {
@@ -7434,21 +7451,43 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
 
     try {
         perfMark('chat-save:start');
-        const payload = {
-            ch_name: characters[this_chid].name,
-            file_name: fileName,
-            chat: [chatHeader, ...trimmedChat],
-            avatar_url: characters[this_chid].avatar,
-            force: force,
-        };
+        const headerLine = JSON.stringify(chatHeader);
+        const avatarUrl = characters[this_chid].avatar;
+        // Delta saves apply only to the live chat file saved in full;
+        // bookmark/branch copies (chatName), partial slices (mesId/chatData)
+        // and forced integrity overwrites always take the full-save path.
+        const isOwnLiveChat = chatName === undefined && chatData === undefined && mesId === undefined && !force;
 
-        // Serialization + compression happen in a worker so a multi-MB
-        // chat does not freeze the UI on every save; on any worker
-        // failure the inline path below produces the identical request.
+        if (isOwnLiveChat) {
+            const deltaPlan = buildChatDeltaRequest({
+                chatKey: `${avatarUrl}||${fileName}`,
+                chatLength: chat.length,
+                headerLine,
+                serializeMessage: (index) => JSON.stringify(chat[index]),
+            });
+            if (deltaPlan?.noop) {
+                // Nothing changed since the acknowledged on-disk state.
+                perfMeasure('chat-save', 'chat-save:start');
+                return;
+            }
+            if (deltaPlan && await sendChatSaveDelta(deltaPlan, fileName, avatarUrl)) {
+                perfMeasure('chat-save', 'chat-save:start');
+                return;
+            }
+        }
+
+        // Full save. Serialization + compression happen in a worker so a
+        // multi-MB chat costs one structured clone on the main thread; on
+        // any worker failure the inline path below produces the legacy
+        // /api/chats/save request instead.
+        let saveUrl = '/api/chats/save';
         let saveChatRequest;
-        const offThread = await serializeChatSaveOffThread(payload);
+        const offThread = await serializeChatSaveOffThread({ headerLine, messages: trimmedChat });
         if (offThread) {
+            const query = new URLSearchParams({ file_name: fileName, avatar_url: avatarUrl, force: force ? '1' : '0' });
+            saveUrl = `/api/chats/save-raw?${query.toString()}`;
             const headers = new Headers(getRequestHeaders());
+            headers.set('Content-Type', 'application/x-ndjson');
             if (offThread.gzip) {
                 headers.set('Content-Encoding', 'gzip');
             }
@@ -7458,15 +7497,37 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
                 method: 'POST',
                 cache: 'no-cache',
                 headers: getRequestHeaders(),
-                body: JSON.stringify(payload),
+                body: JSON.stringify({
+                    ch_name: characters[this_chid].name,
+                    file_name: fileName,
+                    chat: [chatHeader, ...trimmedChat],
+                    avatar_url: avatarUrl,
+                    force: force,
+                }),
             });
         }
-        const result = await fetch('/api/chats/save', saveChatRequest);
+        const result = await fetch(saveUrl, saveChatRequest);
         perfMeasure('chat-save', 'chat-save:start');
 
         if (result.ok) {
+            if (isOwnLiveChat && offThread) {
+                // The worker reported the exact bytes written — the ledger
+                // can arm on them and serve the next hot saves as deltas.
+                armChatSaveLedger({
+                    chatKey: `${avatarUrl}||${fileName}`,
+                    lineCount: offThread.rawLineCount,
+                    fileSize: offThread.rawByteLength,
+                    headerLine,
+                    snapshotToken,
+                });
+            } else {
+                // Inline /save path or a copy/slice save: the on-disk state
+                // of the live chat is not known-tracked; stay fail-closed.
+                isOwnLiveChat && poisonChatSaveLedger('full-save-without-size-report');
+            }
             return;
         }
+        poisonChatSaveLedger(`full-save-http-${result.status}`);
 
         const errorData = await result.json();
         const isIntegrityError = errorData?.error === 'integrity' && !force;
@@ -7492,8 +7553,57 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
 
         await saveChat({ chatName, withMetadata, mesId, force: true });
     } catch (error) {
+        poisonChatSaveLedger('full-save-error');
         console.error(error);
         toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
+    }
+}
+
+/**
+ * Sends an incremental save built by the ledger to /api/chats/save-delta.
+ * Any failure returns false and the caller falls back to a full save.
+ * @param {import('./scripts/chat-save-ledger.js').ChatDeltaPlan} plan Delta plan
+ * @param {string} fileName Chat file name (without extension)
+ * @param {string} avatarUrl Character avatar the chat belongs to
+ * @returns {Promise<boolean>} Whether the delta was applied
+ */
+async function sendChatSaveDelta(plan, fileName, avatarUrl) {
+    try {
+        const body = JSON.stringify({
+            file_name: fileName,
+            avatar_url: avatarUrl,
+            base: plan.base,
+            ops: plan.ops,
+        });
+        const response = await fetch('/api/chats/save-delta', {
+            method: 'POST',
+            cache: 'no-cache',
+            headers: getRequestHeaders(),
+            body,
+        });
+        if (response.status === 404) {
+            // Server has delta saves disabled (or predates them).
+            markChatSaveDeltaUnsupported();
+            return false;
+        }
+        if (!response.ok) {
+            // 409 base-mismatch, 400, 500 — all mean the same thing here:
+            // this delta cannot apply; the caller full-saves instead.
+            poisonChatSaveLedger(`delta-http-${response.status}`);
+            return false;
+        }
+        const result = await response.json();
+        ackChatDeltaSave({
+            lineCount: result?.lineCount,
+            fileSize: result?.fileSize,
+            headerLine: plan.headerLine,
+            requestBytes: new TextEncoder().encode(body).byteLength,
+        });
+        return true;
+    } catch (error) {
+        console.warn('Chat delta save failed, falling back to a full save.', error);
+        poisonChatSaveLedger('delta-network-error');
+        return false;
     }
 }
 
@@ -7669,6 +7779,9 @@ export async function getChat() {
         }
 
         const data = await response.json();
+        // A different file is becoming the live chat; the ledger re-arms on
+        // its first full save.
+        poisonChatSaveLedger('chat-loaded');
         if (Array.isArray(data) && data.length > 0) {
             /** @type {ChatHeader} */
             const chatHeader = data.shift();
@@ -8160,6 +8273,7 @@ function updateMessage(div) {
         ?? mesBlock.find('.mes_text').text();
     const mesElement = div.closest('.mes');
     const mes = chat[mesElement.attr('mesid')];
+    recordChatTouch(Number(mesElement.attr('mesid')));
 
     // editing old messages
     mes.extra ??= {};
@@ -8396,6 +8510,8 @@ async function messageEditMove(sourceId, targetId) {
     targetMessageDiv.attr('mesid', sourceId);
     sourceMessageDiv.attr('mesid', targetId);
 
+    // Reorders cannot be represented by delta ops.
+    poisonChatSaveLedger('message-move');
     // Swap chat array entries.
     [chat[sourceId], chat[targetId]] = [chat[targetId], chat[sourceId]];
 
@@ -9365,6 +9481,8 @@ export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
         toastr.warning(t`No messages to delete swipes from.`);
         return;
     }
+    // A spurious touch (validation failing below) is harmless by design.
+    recordChatTouch(messageId);
 
     if (message.swipes.length <= 1) {
         toastr.warning(t`Can't delete the last swipe.`);
@@ -9937,6 +10055,7 @@ export async function createOrEditCharacter(e) {
                 (chat.length === 0 || (chat.length === 1 && !chat[0].is_user && !chat[0].is_system));
 
             if (shouldRegenerateMessage) {
+                poisonChatSaveLedger('first-message-regenerate');
                 chat.splice(0, chat.length, message);
                 const messageId = (chat.length - 1);
                 await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, 'first_message');
@@ -10030,6 +10149,10 @@ export async function swipe(event, direction, { source, repeated, message = chat
         return;
     }
     const originalSwipeId = Number(chat[mesId]?.swipe_id ?? 0);
+    // Every path below may change swipe_id/swipes/mes on this message —
+    // including left swipes that do not save immediately. A spurious touch
+    // on an aborted swipe is harmless by design.
+    recordChatTouch(mesId);
     let newSwipeId = Number(forceSwipeId ?? originalSwipeId);
 
     /**
@@ -10948,6 +11071,7 @@ export async function newAssistantChat({ temporary = false } = {}) {
     if (!temporary) {
         return openPermanentAssistantChat();
     }
+    poisonChatSaveLedger('temporary-assistant-chat');
     chat.splice(0, chat.length);
     chat_metadata = {};
     setCharacterName(neutralCharacterName);
@@ -11033,6 +11157,8 @@ function addDebugFunctions() {
             message.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
         }
 
+        // Bulk in-place rewrite across the whole chat: full save.
+        poisonChatSaveLedger('token-count-backfill');
         await saveChatConditional();
         await reloadCurrentChat();
     };
@@ -11997,6 +12123,7 @@ jQuery(async function () {
             clone.mes = clone.mes.trim();
         }
 
+        poisonChatSaveLedger('edit-clone-insert');
         chat.splice(Number(this_edit_mes_id) + 1, 0, clone);
         const newMessageElement = updateMessageElement(clone);
         this_edit_mes_element.after(newMessageElement);

@@ -30,6 +30,7 @@ import {
     chatElement,
 } from '../script.js';
 import { selected_group } from './group-chats.js';
+import { recordChatTouch } from './chat-save-ledger.js';
 import { power_user } from './power-user.js';
 import {
     extractTextFromHTML,
@@ -155,6 +156,7 @@ export async function hideChatMessageRange(start, end, unhide, nameFitler = null
         if (nameFitler && message.name !== nameFitler) continue;
 
         message.is_system = hide;
+        recordChatTouch(messageId);
 
         // Also toggle "hidden" state for all visible messages
         const messageBlock = $(`.mes[mesid="${messageId}"]`);
@@ -419,6 +421,7 @@ async function deleteMessageFile(messageBlock, messageId, fileIndex) {
 
     const url = message.extra.files[fileIndex]?.url;
     message.extra.files.splice(fileIndex, 1);
+    recordChatTouch(messageId);
 
     await saveChatConditional();
     await deleteFileFromServer(url);
@@ -495,6 +498,7 @@ function embedMessageFile(messageId, messageBlock) {
         await populateFileAttachment(message, 'embed_file_input');
         await eventSource.emit(event_types.MESSAGE_FILE_EMBEDDED, messageId);
         appendMediaToMessage(message, messageBlock, SCROLL_BEHAVIOR.KEEP);
+        recordChatTouch(messageId);
         await saveChatConditional();
     }
 }
@@ -1032,6 +1036,7 @@ async function deleteMessageMedia(messageId, mediaIndex, messageBlock) {
 
     deleteUrls.push(message.extra.media[mediaIndex].url);
     message.extra.media.splice(mediaIndex, 1);
+    recordChatTouch(messageId);
 
     if (message.extra.media_index === mediaIndex) {
         const newIndex = mediaIndex > 0 ? mediaIndex - 1 : 0;
@@ -1084,6 +1089,7 @@ async function switchMessageMediaDisplay(messageId, messageBlock, targetDisplay)
     }
 
     message.extra.media_display = targetDisplay;
+    recordChatTouch(messageId);
     await saveChatConditional();
     appendMediaToMessage(message, messageBlock, SCROLL_BEHAVIOR.KEEP);
 }
@@ -2102,6 +2108,7 @@ async function onImageSwiped(messageId, element, direction) {
         message.extra.media_index = newIndex >= media.length ? 0 : newIndex;
     }
 
+    recordChatTouch(chat.indexOf(message));
     await saveChatConditional();
     appendMediaToMessage(message, element);
 }

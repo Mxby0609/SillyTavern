@@ -15,6 +15,7 @@ import {
     setActiveGroup,
     getCurrentChatDetails,
 } from '../script.js';
+import { recordChatTouch } from './chat-save-ledger.js';
 import { humanizedDateTime } from './RossAscends-mods.js';
 import {
     DEFAULT_AUTO_MODE_DELAY,
@@ -288,6 +289,7 @@ export async function createNewBookmark(mesId, { forceName = null } = {}) {
     }
 
     lastMes.extra.bookmark_link = name;
+    recordChatTouch(mesId);
 
     const mes = $(`.mes[mesid="${mesId}"]`);
     updateBookmarkDisplay(mes, name);

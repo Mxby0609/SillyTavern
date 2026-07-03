@@ -64,6 +64,19 @@ test.describe('Phone-emulation performance', () => {
         // Keep fixture files byte-identical: serialization+gzip still run,
         // only the server-side write is skipped (it never blocks the UI).
         await page.route('**/api/chats/save', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"result":"ok"}' }));
+        await page.route('**/api/chats/save-raw*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' }));
+        // The delta ack must carry plausible integers or the ledger poisons
+        // itself and every measured save degrades to a full save.
+        await page.route('**/api/chats/save-delta', async (route) => {
+            const body = route.request().postDataJSON();
+            const appended = (body?.ops ?? []).filter(op => op.op === 'append').flatMap(op => op.lines).length;
+            const bytes = (body?.ops ?? []).reduce((sum, op) => sum + (op.lines ?? [op.line ?? '']).join('').length, 0);
+            await route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ ok: true, lineCount: (body?.base?.lineCount ?? 1) + appended, fileSize: (body?.base?.fileSize ?? 0) + bytes }),
+            });
+        });
 
         await page.evaluate(() => localStorage.setItem('perfTrace', '1'));
         await page.reload();
@@ -134,6 +147,18 @@ test.describe('Phone-emulation performance', () => {
         });
         results['assemble-prompt-hot'] = await collectMeters(page, wallMs);
 
+        // Arm the delta ledger with one un-metered full save, so every hot
+        // scenario below measures its real (delta) save path instead of one
+        // of them absorbing the arming full save. (Direct import — the
+        // context.saveChat wrapper poisons by design.)
+        await page.evaluate(async () => {
+            const { saveChat } = await import('/script.js');
+            const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
+            poisonChatSaveLedger('perf-arming');
+            await saveChat();
+        });
+        await page.waitForTimeout(SETTLE_MS);
+
         // --- Scenario: swipe between EXISTING replies (render + save) ---
         // Every fixture assistant message has 3 swipes; the last message is
         // an assistant one, so the arrows are present.
@@ -156,13 +181,31 @@ test.describe('Phone-emulation performance', () => {
         await page.waitForTimeout(SETTLE_MS);
         results['send-user-message'] = await collectMeters(page, wallMs);
 
-        // --- Scenario: bare full-chat save (the shared tail) ---
+        // --- Scenario: FULL chat save (the R3.2 fallback/reconciliation
+        // path — poison first so the ledger cannot serve a delta). This is
+        // the number comparable with earlier rounds' save-chat. ---
         await resetMeters(page);
         wallMs = await timeEvaluate(page, async () => {
-            await globalThis.SillyTavern.getContext().saveChat();
+            const { saveChat } = await import('/script.js');
+            const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
+            poisonChatSaveLedger('perf-full-save-scenario');
+            await saveChat();
         });
         await waitForMeasure(page, 'tokencache-save', MEASURE_TIMEOUT_MS);
         results['save-chat'] = await collectMeters(page, wallMs);
+
+        // --- Scenario: DELTA save of one touched message (the new hot
+        // path for swipe/stop/edit saves). The full save above re-armed
+        // the ledger. ---
+        await resetMeters(page);
+        wallMs = await timeEvaluate(page, async () => {
+            const { chat, saveChat } = await import('/script.js');
+            const { recordChatTouch } = await import('/scripts/chat-save-ledger.js');
+            recordChatTouch(chat.length - 1);
+            await saveChat();
+        });
+        await waitForMeasure(page, 'tokencache-save', MEASURE_TIMEOUT_MS);
+        results['save-chat-delta'] = await collectMeters(page, wallMs);
 
         // --- Scenario: itemized-prompts persistence (real generations only,
         // so absent from the synthetic scenarios above). Every generated

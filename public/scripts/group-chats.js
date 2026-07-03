@@ -87,6 +87,7 @@ import { POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { compressRequest } from './request-compression.js';
+import { serializeChatSaveOffThread } from './chat-save-serializer.js';
 
 export {
     selected_group,
@@ -634,12 +635,29 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         user_name: 'unused',
         character_name: 'unused',
     };
-    const saveGroupChatRequest = await compressRequest({
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({ id: chatId, chat: [chatHeader, ...chat], force: force }),
-    });
-    const response = await fetch('/api/chats/group/save', saveGroupChatRequest);
+    // Serialization + compression happen in the save worker so a multi-MB
+    // group chat costs one structured clone on the main thread; on any
+    // worker failure the inline path below produces the legacy request.
+    let saveUrl = '/api/chats/group/save';
+    let saveGroupChatRequest;
+    const offThread = await serializeChatSaveOffThread({ headerLine: JSON.stringify(chatHeader), messages: chat });
+    if (offThread) {
+        const query = new URLSearchParams({ group_id: String(chatId), force: force ? '1' : '0' });
+        saveUrl = `/api/chats/save-raw?${query.toString()}`;
+        const headers = new Headers(getRequestHeaders());
+        headers.set('Content-Type', 'application/x-ndjson');
+        if (offThread.gzip) {
+            headers.set('Content-Encoding', 'gzip');
+        }
+        saveGroupChatRequest = { method: 'POST', headers, body: offThread.body };
+    } else {
+        saveGroupChatRequest = await compressRequest({
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ id: chatId, chat: [chatHeader, ...chat], force: force }),
+        });
+    }
+    const response = await fetch(saveUrl, saveGroupChatRequest);
 
     if (!response.ok) {
         const errorData = await response.json();
