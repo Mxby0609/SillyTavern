@@ -282,6 +282,48 @@ test.describe('Incremental chat saves', () => {
             expect(traffic.filter(t => t.kind === 'raw').length, 'the extension save full-saved').toBe(1);
             serverChat = await fetchServerChat(page, info);
             expect(serverChat[1].extra?.probe, 'the extension write reached the disk').toBe('extension-write');
+
+            // Caption recaption: an in-tree extension with a DIRECT
+            // saveChatConditional import (bypasses the context wrapper).
+            // The real click path must persist the new caption.
+            await page.route('**/api/extra/caption', route => route.fulfill({
+                status: 200, contentType: 'application/json', body: JSON.stringify({ caption: 'mocked caption 图注' }),
+            }));
+            traffic.length = 0;
+            const captionState = await page.evaluate(async () => {
+                const { chat, appendMediaToMessage } = await import('/script.js');
+                const { extension_settings } = await import('/scripts/extensions.js');
+                extension_settings.caption ??= {};
+                extension_settings.caption.source = 'local';
+                const $ = globalThis.jQuery;
+                const messageId = chat.length - 1;
+                chat[messageId].extra = { ...(chat[messageId].extra ?? {}), media: [{ url: '/img/ai4.png', type: 'image', title: '' }], media_index: 0 };
+                const messageBlock = $(`.mes[mesid="${messageId}"]`);
+                appendMediaToMessage(chat[messageId], messageBlock);
+                // Media DOM lands asynchronously (after the image loads);
+                // wait for the caption button before clicking it.
+                let buttons = $();
+                for (let i = 0; i < 50; i++) {
+                    buttons = messageBlock.find('.mes_img_caption');
+                    if (buttons.length) break;
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                buttons.first().trigger('click');
+                // The click handler is async; wait for the caption to land.
+                for (let i = 0; i < 50; i++) {
+                    if (chat[messageId].extra.media[0].captioned) break;
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                return { captioned: Boolean(chat[messageId].extra.media[0].captioned) };
+            });
+            await page.unroute('**/api/extra/caption');
+            expect(captionState.captioned, 'the recaption flow ran to completion').toBe(true);
+            // The handler's save fires after the caption lands; poll for it.
+            await expect.poll(() => traffic.length, { timeout: 10000 }).toBeGreaterThan(0);
+            expect(traffic.length > 0, 'the recaption save was not treated as a noop').toBe(true);
+            serverChat = await fetchServerChat(page, info);
+            const captionedMedia = serverChat[serverChat.length - 1].extra?.media?.[0];
+            expect(captionedMedia?.title ?? '', 'the caption reached the disk').toContain('mocked caption 图注');
         } finally {
             await deleteThrowawayChat(page, info);
         }
