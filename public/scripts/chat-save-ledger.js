@@ -43,6 +43,15 @@ let touchedIndexes = new Map();
 let deltasSinceFullSave = 0;
 let bytesSinceFullSave = 0;
 let reconcileDue = false;
+/**
+ * Set when a record arrives while the ledger is unarmed — i.e. possibly
+ * AFTER a poisoned full save took its snapshot but before it armed. Such
+ * a mutation is absent from the snapshot and its record was dropped, so
+ * arming on that snapshot would let the queued follow-up save noop it
+ * away. beginFullSaveSnapshot() clears the flag at snapshot time;
+ * armChatSaveLedger refuses to arm while it is set.
+ */
+let unarmedMutationSeen = false;
 /** @type {ReturnType<typeof setTimeout>|null} */
 let idleTimer = null;
 
@@ -94,7 +103,10 @@ function guardTrackedEntryCap() {
  * @param {number} index Message index in chat[]
  */
 export function recordChatAppend(index) {
-    if (!armed) return;
+    if (!armed) {
+        unarmedMutationSeen = true;
+        return;
+    }
     appendedIndexes.set(index, armEpoch);
     guardTrackedEntryCap();
 }
@@ -105,7 +117,10 @@ export function recordChatAppend(index) {
  * @param {number} index Message index in chat[]
  */
 export function recordChatTouch(index) {
-    if (!armed) return;
+    if (!armed) {
+        unarmedMutationSeen = true;
+        return;
+    }
     touchedIndexes.set(index, armEpoch);
     guardTrackedEntryCap();
 }
@@ -131,8 +146,24 @@ function parseIntegrity(headerLine) {
  * @param {number} ack.fileSize Bytes on disk
  * @param {string} ack.headerLine The exact header line that was written
  */
+/**
+ * Marks the moment a full save snapshots the chat (synchronously, before
+ * its first await). Records arriving after this moment while the ledger
+ * is unarmed are NOT in the snapshot — they block the subsequent arm.
+ */
+export function beginFullSaveSnapshot() {
+    unarmedMutationSeen = false;
+}
+
 export function armChatSaveLedger({ chatKey, lineCount, fileSize, headerLine }) {
     if (unsupported) return;
+    if (unarmedMutationSeen) {
+        // A mutation landed while this full save was in flight (its record
+        // was dropped and its content is not in the written bytes). Stay
+        // fail-closed: the queued follow-up save must be a full save.
+        poisonChatSaveLedger('mutation-during-full-save');
+        return;
+    }
     if (!Number.isInteger(lineCount) || lineCount < 1 || !Number.isInteger(fileSize) || fileSize < 0) {
         poisonChatSaveLedger('bad-ack');
         return;

@@ -287,7 +287,7 @@ import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
 import { serializeChatSaveOffThread } from './scripts/chat-save-serializer.js';
-import { ackChatDeltaSave, armChatSaveLedger, buildChatDeltaRequest, markChatSaveDeltaUnsupported, poisonChatSaveLedger, recordChatAppend, recordChatTouch } from './scripts/chat-save-ledger.js';
+import { ackChatDeltaSave, armChatSaveLedger, beginFullSaveSnapshot, buildChatDeltaRequest, markChatSaveDeltaUnsupported, poisonChatSaveLedger, recordChatAppend, recordChatTouch } from './scripts/chat-save-ledger.js';
 import { perfMark, perfMeasure, perfAccum, perfNow } from './scripts/perf-metrics.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
@@ -7438,6 +7438,9 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
         : (mesId !== undefined && mesId >= 0 && mesId < chat.length)
             ? chat.slice(0, Number(mesId) + 1)
             : chat.slice();
+    // Snapshot moment: unarmed records arriving after this point are not
+    // in trimmedChat and must block the post-save arm.
+    beginFullSaveSnapshot();
 
     /** @type {ChatHeader} */
     const chatHeader = {

@@ -438,6 +438,48 @@ test.describe('Incremental chat saves', () => {
         }
     });
 
+    test('a mutation landing while a poisoned full save is in flight is not swallowed', async ({ page }) => {
+        const info = await openThrowawayChat(page);
+        const { traffic } = info;
+        try {
+            await sendUserMessage(page, 'base one');
+            await sendUserMessage(page, 'base two');
+            await page.waitForTimeout(1200);
+
+            // Slow the full save down so a wired mutation can land while it
+            // is in flight — after its snapshot, before its arm.
+            await page.route('**/api/chats/save-raw*', async (route) => {
+                await new Promise(resolve => setTimeout(resolve, 800));
+                await route.fallback();
+            });
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const { saveChatConditional } = await import('/script.js');
+                const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
+                const { hideChatMessageRange } = await import('/scripts/chats.js');
+                poisonChatSaveLedger('race-test');
+                const inFlight = saveChatConditional();
+                // Let the save take its snapshot and start its request.
+                await new Promise(resolve => setTimeout(resolve, 250));
+                // A wired same-length mutation: its touch is dropped (the
+                // ledger is unarmed) and its content is NOT in the snapshot.
+                // hideChatMessageRange also queues its own save.
+                await hideChatMessageRange(0, 0, false);
+                await inFlight;
+            });
+            await page.unroute('**/api/chats/save-raw*');
+
+            // The queued save must NOT have been swallowed as a noop; the
+            // hidden flag must reach the disk without waiting for any
+            // reconciliation.
+            const serverChat = await fetchServerChat(page, info);
+            expect(serverChat[1].is_system, 'the mid-flight mutation reached the disk').toBe(true);
+            expect(traffic.filter(t => t.kind === 'raw').length >= 2, 'the follow-up save stayed a full save').toBe(true);
+        } finally {
+            await deleteThrowawayChat(page, info);
+        }
+    });
+
     test('a foreign write 409s the delta and the client recovers transparently', async ({ page }) => {
         const info = await openThrowawayChat(page);
         const { traffic } = info;
