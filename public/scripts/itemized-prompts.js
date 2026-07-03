@@ -17,6 +17,25 @@ const promptStorage = localforage.createInstance({ name: 'SillyTavern_Prompts' }
 export let itemizedPrompts = [];
 
 /**
+ * Whether the in-memory array diverged from what was last written to
+ * storage. saveItemizedPrompts persists the WHOLE array on every chat
+ * save; with the flag, unchanged arrays (swipe taps, metadata saves) skip
+ * the rewrite entirely. Claimed false BEFORE the write starts so a
+ * mutation landing while a write is in flight keeps the array dirty for
+ * the next save; restored to true when a write fails.
+ */
+let itemizedPromptsDirty = false;
+
+/**
+ * Marks the itemized prompts as changed since the last successful write.
+ * Every mutation site must call this — including external ones
+ * (script.js pushes/replaces entries after each generation).
+ */
+export function markItemizedPromptsDirty() {
+    itemizedPromptsDirty = true;
+}
+
+/**
  * Gets the itemized prompts for a chat.
  * @param {string} chatId Chat ID to load
  */
@@ -24,6 +43,7 @@ export async function loadItemizedPrompts(chatId) {
     try {
         if (!chatId) {
             itemizedPrompts = [];
+            itemizedPromptsDirty = false;
             return;
         }
 
@@ -33,10 +53,14 @@ export async function loadItemizedPrompts(chatId) {
             itemizedPrompts = [];
         }
 
+        // Fresh from storage: memory and storage agree.
+        itemizedPromptsDirty = false;
+
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_LOADED, { chatId: chatId });
     } catch {
         console.log('Error loading itemized prompts for chat', chatId);
         itemizedPrompts = [];
+        itemizedPromptsDirty = false;
     }
 }
 
@@ -45,16 +69,21 @@ export async function loadItemizedPrompts(chatId) {
  * @param {string} chatId Chat ID to save itemized prompts for
  */
 export async function saveItemizedPrompts(chatId) {
-    try {
-        if (!chatId) {
-            return;
-        }
+    if (!chatId || !itemizedPromptsDirty) {
+        return;
+    }
 
+    // Claim before the write: a mutation arriving while setItem is in
+    // flight re-marks dirty and the NEXT save writes it.
+    itemizedPromptsDirty = false;
+
+    try {
         perfMark('itemized-save:start');
         await promptStorage.setItem(chatId, itemizedPrompts);
         perfMeasure('itemized-save', 'itemized-save:start');
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_SAVED, { chatId: chatId });
     } catch {
+        itemizedPromptsDirty = true;
         console.log('Error saving itemized prompts for chat', chatId);
     }
 }
@@ -77,6 +106,7 @@ export async function replaceItemizedPromptText(mesId, promptText) {
     }
 
     itemizedPrompt.rawPrompt = promptText;
+    markItemizedPromptsDirty();
 }
 
 /**
@@ -103,6 +133,8 @@ export async function clearItemizedPrompts() {
     try {
         await promptStorage.clear();
         itemizedPrompts = [];
+        // Memory and storage agree again (both empty).
+        itemizedPromptsDirty = false;
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_DELETED, { all: true });
     } catch {
         console.log('Error clearing itemized prompts');
@@ -382,6 +414,10 @@ export function swapItemizedPrompts(sourceMessageId, targetMessageId) {
     });
 
     itemizedPrompts.sort((a, b) => a.mesId - b.mesId);
+
+    if (sourcePrompts.length || targetPrompts.length) {
+        markItemizedPromptsDirty();
+    }
 }
 
 /**
@@ -394,9 +430,16 @@ export function deleteItemizedPromptForMessage(messageId) {
         return;
     }
 
+    const sizeBefore = itemizedPrompts.length;
     itemizedPrompts = itemizedPrompts.filter(x => x.mesId !== messageId);
 
+    let shifted = false;
     for (const prompt of itemizedPrompts.filter(x => x.mesId > messageId)) {
         prompt.mesId -= 1;
+        shifted = true;
+    }
+
+    if (shifted || itemizedPrompts.length !== sizeBefore) {
+        markItemizedPromptsDirty();
     }
 }
