@@ -8,7 +8,16 @@ import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 import _ from 'lodash';
 
-import validateAvatarUrlMiddleware from '../middleware/validateFileName.js';
+import validateAvatarUrlMiddleware, { forbiddenRegExp } from '../middleware/validateFileName.js';
+import {
+    BaseMismatchError,
+    IntegrityConflictError,
+    InvalidDeltaError,
+    applyChatDelta,
+    enqueueFileOperation,
+    fullSaveWithIntegrityCheck,
+    recoverAppendJournal,
+} from '../chat-file-surgery.js';
 import {
     getConfigValue,
     humanizedDateTime,
@@ -16,10 +25,8 @@ import {
     generateTimestamp,
     removeOldBackups,
     formatBytes,
-    tryWriteFileSync,
     tryReadFileSync,
     tryDeleteFile,
-    readFirstLine,
     isPathUnderParent,
 } from '../util.js';
 
@@ -27,18 +34,21 @@ const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean'
 const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
 const throttleInterval = Number(getConfigValue('backups.chat.throttleInterval', 10_000, 'number'));
 const checkIntegrity = !!getConfigValue('backups.chat.checkIntegrity', true, 'boolean');
+const chatSaveDeltaEnabled = !!getConfigValue('performance.chatSaveDelta', true, 'boolean');
 
 export const CHAT_BACKUPS_PREFIX = 'chat_';
 
 /**
- * Saves a chat to the backups directory.
+ * Saves a chat to the backups directory by copying the just-persisted file.
+ * The copy runs async so a multi-MB chat never blocks the event loop for a
+ * second full write.
  * @param {string} directory The user's backup directory.
  * @param {string} name The name of the chat.
- * @param {string} data The serialized chat to save.
+ * @param {string} sourceFile Path of the chat file to copy.
  * @param {string} backupPrefix The file prefix. Typically CHAT_BACKUPS_PREFIX.
  * @returns
  */
-function backupChat(directory, name, data, backupPrefix = CHAT_BACKUPS_PREFIX) {
+function backupChat(directory, name, sourceFile, backupPrefix = CHAT_BACKUPS_PREFIX) {
     try {
         if (!isBackupEnabled) { return; }
         if (!fs.existsSync(directory)) {
@@ -49,12 +59,15 @@ function backupChat(directory, name, data, backupPrefix = CHAT_BACKUPS_PREFIX) {
 
         const backupFile = path.join(directory, `${backupPrefix}${name}_${generateTimestamp()}.jsonl`);
 
-        tryWriteFileSync(backupFile, data);
-        removeOldBackups(directory, `${backupPrefix}${name}_`);
-        if (isNaN(maxTotalChatBackups) || maxTotalChatBackups < 0) {
-            return;
-        }
-        removeOldBackups(directory, backupPrefix, maxTotalChatBackups);
+        fs.promises.copyFile(sourceFile, backupFile).then(() => {
+            removeOldBackups(directory, `${backupPrefix}${name}_`);
+            if (isNaN(maxTotalChatBackups) || maxTotalChatBackups < 0) {
+                return;
+            }
+            removeOldBackups(directory, backupPrefix, maxTotalChatBackups);
+        }).catch((err) => {
+            console.error(`Could not backup chat for ${name}`, err);
+        });
     } catch (err) {
         console.error(`Could not backup chat for ${name}`, err);
     }
@@ -308,33 +321,6 @@ function importRisuChat(userName, characterName, jsonData) {
 }
 
 /**
- * Checks if the chat being saved has the same integrity as the one being loaded.
- * @param {string} filePath Path to the chat file
- * @param {string} integritySlug Integrity slug
- * @returns {Promise<boolean>} Whether the chat is intact
- */
-async function checkChatIntegrity(filePath, integritySlug) {
-    // If the chat file doesn't exist, assume it's intact
-    if (!fs.existsSync(filePath)) {
-        return true;
-    }
-
-    // Parse the first line of the chat file as JSON
-    const firstLine = await readFirstLine(filePath);
-    const jsonData = tryParse(firstLine);
-    const chatIntegrity = jsonData?.chat_metadata?.integrity;
-
-    // If the chat has no integrity metadata, assume it's intact
-    if (!chatIntegrity) {
-        console.debug(`File "${filePath}" does not have integrity metadata matching "${integritySlug}". The integrity validation has been skipped.`);
-        return true;
-    }
-
-    // Check if the integrity matches
-    return chatIntegrity === integritySlug;
-}
-
-/**
  * @typedef {Object} ChatInfo
  * @property {string} [file_id] - The name of the chat file (without extension)
  * @property {string} [file_name] - The name of the chat file (with extension)
@@ -460,11 +446,17 @@ export async function trySaveChat(chatData, filePath, skipIntegrityCheck = false
     const doIntegrityCheck = (checkIntegrity && !skipIntegrityCheck);
     const chatIntegritySlug = doIntegrityCheck ? chatData?.[0]?.chat_metadata?.integrity : undefined;
 
-    if (chatIntegritySlug && !await checkChatIntegrity(filePath, chatIntegritySlug)) {
-        throw new IntegrityMismatchError(`Chat integrity check failed for "${filePath}". The expected integrity slug was "${chatIntegritySlug}".`);
+    try {
+        // The slug is verified inside the per-file queue, against the exact
+        // state this write would overwrite (not a possibly stale snapshot).
+        await fullSaveWithIntegrityCheck(filePath, jsonlData, typeof chatIntegritySlug === 'string' ? chatIntegritySlug : null);
+    } catch (error) {
+        if (error instanceof IntegrityConflictError) {
+            throw new IntegrityMismatchError(error.message);
+        }
+        throw error;
     }
-    tryWriteFileSync(filePath, jsonlData);
-    getBackupFunction(handle)(backupDirectory, cardName, jsonlData);
+    getBackupFunction(handle)(backupDirectory, cardName, filePath);
 }
 
 router.post('/save', validateAvatarUrlMiddleware, async function (request, response) {
@@ -495,6 +487,116 @@ router.post('/save', validateAvatarUrlMiddleware, async function (request, respo
 });
 
 /**
+ * Applies an incremental (delta) save to an existing chat file. Any mismatch
+ * between the client's declared base state and the file on disk returns 409,
+ * and the client transparently falls back to a full save — this endpoint
+ * never triggers the integrity-overwrite popup flow by design.
+ */
+router.post('/save-delta', validateAvatarUrlMiddleware, async function (request, response) {
+    try {
+        if (!chatSaveDeltaEnabled) {
+            return response.sendStatus(404);
+        }
+        const handle = request.user.profile.handle;
+        const cardName = String(request.body.avatar_url).replace('.png', '');
+        const chatFileName = `${String(request.body.file_name)}.jsonl`;
+        const chatFilePath = path.join(request.user.directories.chats, cardName, sanitize(chatFileName));
+        if (!isPathUnderParent(request.user.directories.chats, chatFilePath)) {
+            return response.sendStatus(400);
+        }
+
+        const result = await enqueueFileOperation(chatFilePath, () =>
+            applyChatDelta(chatFilePath, request.body.base, request.body.ops, { enforceIntegrity: checkIntegrity }));
+        getBackupFunction(handle)(request.user.directories.backups, cardName, chatFilePath);
+        return response.send({ ok: true, lineCount: result.lineCount, fileSize: result.fileSize });
+    } catch (error) {
+        if (error instanceof BaseMismatchError) {
+            console.info(`Chat delta rejected (${error.message}); the client will fall back to a full save.`);
+            return response.status(409).send({ error: 'base-mismatch' });
+        }
+        if (error instanceof InvalidDeltaError) {
+            console.error('Invalid chat delta request:', error.message);
+            return response.status(400).send({ error: 'invalid-delta' });
+        }
+        console.error(error);
+        return response.status(500).send({ error: 'An error has occurred, see the console logs for more information.' });
+    }
+});
+
+const rawChatParser = express.raw({ type: 'application/x-ndjson', inflate: true, limit: '500mb' });
+
+/**
+ * Full-file save that accepts the serialized JSONL bytes directly (produced
+ * by the client's save worker), so the server never JSON-parses and
+ * re-stringifies a multi-MB chat. Routing metadata travels in the query
+ * string because the body is opaque bytes.
+ */
+router.post('/save-raw', rawChatParser, async function (request, response) {
+    try {
+        const handle = request.user.profile.handle;
+        const groupId = typeof request.query.group_id === 'string' ? request.query.group_id : '';
+        const fileName = typeof request.query.file_name === 'string' ? request.query.file_name : '';
+        const avatarUrl = typeof request.query.avatar_url === 'string' ? request.query.avatar_url : '';
+        const force = request.query.force === '1' || request.query.force === 'true';
+
+        for (const value of [groupId, fileName, avatarUrl]) {
+            if (value && forbiddenRegExp.test(value)) {
+                return response.sendStatus(400);
+            }
+        }
+
+        if (!Buffer.isBuffer(request.body) || request.body.length === 0) {
+            return response.status(400).send({ error: 'The request body must be non-empty JSONL bytes.' });
+        }
+
+        let chatFilePath;
+        let backupName;
+        if (groupId) {
+            chatFilePath = path.join(request.user.directories.groupChats, sanitize(`${groupId}.jsonl`));
+            backupName = String(groupId);
+            if (!isPathUnderParent(request.user.directories.groupChats, chatFilePath)) {
+                return response.sendStatus(400);
+            }
+        } else {
+            if (!fileName || !avatarUrl) {
+                return response.status(400).send({ error: 'file_name and avatar_url query parameters are required.' });
+            }
+            const cardName = String(avatarUrl).replace('.png', '');
+            chatFilePath = path.join(request.user.directories.chats, cardName, sanitize(`${fileName}.jsonl`));
+            backupName = cardName;
+            if (!isPathUnderParent(request.user.directories.chats, chatFilePath)) {
+                return response.sendStatus(400);
+            }
+        }
+
+        const body = request.body;
+        const doIntegrityCheck = (checkIntegrity && !force);
+        let expectedSlug = null;
+        if (doIntegrityCheck) {
+            const newlineIndex = body.indexOf(0x0A);
+            const firstLine = body.subarray(0, newlineIndex === -1 ? body.length : newlineIndex).toString('utf8');
+            const chatIntegritySlug = tryParse(firstLine)?.chat_metadata?.integrity;
+            expectedSlug = typeof chatIntegritySlug === 'string' ? chatIntegritySlug : null;
+        }
+
+        try {
+            await fullSaveWithIntegrityCheck(chatFilePath, body, expectedSlug);
+        } catch (error) {
+            if (error instanceof IntegrityConflictError) {
+                console.error(error.message);
+                return response.status(400).send({ error: 'integrity' });
+            }
+            throw error;
+        }
+        getBackupFunction(handle)(request.user.directories.backups, backupName, chatFilePath);
+        return response.send({ ok: true });
+    } catch (error) {
+        console.error(error);
+        return response.status(500).send({ error: 'An error has occurred, see the console logs for more information.' });
+    }
+});
+
+/**
  * Gets the chat as an object.
  * @param {string} chatFilePath The full chat file path.
  * @returns {Array}} If the chatFilePath cannot be read, this will return [].
@@ -514,7 +616,7 @@ export function getChatData(chatFilePath) {
     return chatData;
 }
 
-router.post('/get', validateAvatarUrlMiddleware, function (request, response) {
+router.post('/get', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         const dirName = String(request.body.avatar_url).replace('.png', '');
         const directoryPath = path.join(request.user.directories.chats, dirName);
@@ -535,6 +637,12 @@ router.post('/get', validateAvatarUrlMiddleware, function (request, response) {
 
         const chatFileName = `${String(request.body.file_name)}.jsonl`;
         const chatFilePath = path.join(directoryPath, sanitize(chatFileName));
+
+        // Finish any append interrupted by a crash before serving the file.
+        // Best-effort: a recovery failure must never blank the chat response.
+        await enqueueFileOperation(chatFilePath, () => recoverAppendJournal(chatFilePath)).catch((error) => {
+            console.error(`Append journal recovery failed for "${chatFilePath}"`, error);
+        });
 
         return response.send(getChatData(chatFilePath));
     } catch (error) {

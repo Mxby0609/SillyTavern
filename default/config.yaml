@@ -259,6 +259,10 @@ performance:
     maxPayloadSize: '8mb'
     # Timeout for request compression in milliseconds.
     timeout: 4000
+  # Enables incremental (delta) chat saves. Hot actions (send/swipe/stop/edit) then write
+  # only the changed lines instead of rewriting the whole chat file. When disabled (or when
+  # anything is uncertain), clients transparently fall back to full-file saves.
+  chatSaveDelta: true
 
 # CACHE BUSTER CONFIGURATION
 # IMPORTANT: Requires localhost or a domain with HTTPS, otherwise will not work!
