@@ -50,9 +50,9 @@ test.describe('Itemized prompts dirty flag', () => {
                 await saveAndSettle();
                 counts.cleanSaveAdds = writes - settled;
 
-                // Generation-site mutation (script.js pushes + marks dirty).
-                itemized.itemizedPrompts.push({ mesId: 990001, rawPrompt: 'probe one' });
-                itemized.markItemizedPromptsDirty();
+                // Generation-site mutation: the same upsert entry point
+                // script.js records each generation through.
+                itemized.upsertItemizedPrompt({ mesId: 990001, rawPrompt: 'probe one' });
                 await saveAndSettle();
                 counts.afterPush = writes - settled;
 
@@ -80,15 +80,10 @@ test.describe('Itemized prompts dirty flag', () => {
                 counts.afterDeleteRepeat = writes - settled;
             } finally {
                 eventSource.removeListener(event_types.ITEMIZED_PROMPTS_SAVED, onSaved);
-                // Restore: drop any leftover probe entries and persist the
-                // cleaned state so storage matches the pre-test content.
-                for (let i = itemized.itemizedPrompts.length - 1; i >= 0; i--) {
-                    const mesId = itemized.itemizedPrompts[i]?.mesId;
-                    if (mesId === 990001 || mesId === 990002) {
-                        itemized.itemizedPrompts.splice(i, 1);
-                    }
-                }
-                itemized.markItemizedPromptsDirty();
+                // Restore: drop any leftover probe entries (the module's
+                // own delete marks dirty) and persist the cleaned state.
+                itemized.deleteItemizedPromptForMessage(990002);
+                itemized.deleteItemizedPromptForMessage(990001);
                 await saveChatConditional();
             }
             return counts;
@@ -116,21 +111,22 @@ test.describe('Itemized prompts dirty flag', () => {
             const store = globalThis.SillyTavern.libs.localforage.createInstance({ name: 'SillyTavern_Prompts' });
             const chatId = context.getCurrentChatId();
 
-            itemized.itemizedPrompts.push({ mesId: 990003, rawPrompt: 'before-edit' });
-            itemized.markItemizedPromptsDirty();
+            itemized.upsertItemizedPrompt({ mesId: 990003, rawPrompt: 'before-edit' });
             try {
-                itemized.replaceItemizedPromptText(990003, 'after-edit');
+                await itemized.replaceItemizedPromptText(990003, 'after-edit');
                 await saveChatConditional();
-                const stored = await store.getItem(chatId);
-                const entry = (stored ?? []).find(x => x.mesId === 990003);
-                return { storedText: entry?.rawPrompt ?? null };
-            } finally {
-                for (let i = itemized.itemizedPrompts.length - 1; i >= 0; i--) {
-                    if (itemized.itemizedPrompts[i]?.mesId === 990003) {
-                        itemized.itemizedPrompts.splice(i, 1);
+                // The write is fired without await; poll until it lands.
+                for (let i = 0; i < 20; i++) {
+                    const stored = await store.getItem(chatId);
+                    const entry = (stored ?? []).find(x => x.mesId === 990003);
+                    if (entry) {
+                        return { storedText: entry.rawPrompt ?? null };
                     }
+                    await new Promise(resolve => setTimeout(resolve, 100));
                 }
-                itemized.markItemizedPromptsDirty();
+                return { storedText: null };
+            } finally {
+                itemized.deleteItemizedPromptForMessage(990003);
                 await saveChatConditional();
             }
         });

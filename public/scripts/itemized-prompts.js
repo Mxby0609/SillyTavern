@@ -28,11 +28,29 @@ let itemizedPromptsDirty = false;
 
 /**
  * Marks the itemized prompts as changed since the last successful write.
- * Every mutation site must call this — including external ones
- * (script.js pushes/replaces entries after each generation).
+ * Internal: every mutating function in this module calls it; external
+ * writers go through upsertItemizedPrompt so mutation and marking stay
+ * atomic in one place.
  */
-export function markItemizedPromptsDirty() {
+function markItemizedPromptsDirty() {
     itemizedPromptsDirty = true;
+}
+
+/**
+ * Inserts or replaces the itemized prompt for a message and marks the
+ * store dirty — the single entry point for generation-time recording.
+ * @param {object} entry Itemized prompt entry (keyed by entry.mesId)
+ */
+export function upsertItemizedPrompt(entry) {
+    const index = itemizedPrompts.findIndex((item) => item.mesId === entry.mesId);
+
+    if (index !== -1) {
+        itemizedPrompts[index] = entry;
+    } else {
+        itemizedPrompts.push(entry);
+    }
+
+    markItemizedPromptsDirty();
 }
 
 /**
