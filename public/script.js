@@ -7439,8 +7439,8 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
             ? chat.slice(0, Number(mesId) + 1)
             : chat.slice();
     // Snapshot moment: unarmed records arriving after this point are not
-    // in trimmedChat and must block the post-save arm.
-    beginFullSaveSnapshot();
+    // in trimmedChat and must invalidate this save's arm token.
+    const snapshotToken = beginFullSaveSnapshot();
 
     /** @type {ChatHeader} */
     const chatHeader = {
@@ -7518,6 +7518,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
                     lineCount: offThread.rawLineCount,
                     fileSize: offThread.rawByteLength,
                     headerLine,
+                    snapshotToken,
                 });
             } else {
                 // Inline /save path or a copy/slice save: the on-disk state

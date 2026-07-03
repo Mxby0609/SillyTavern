@@ -44,14 +44,14 @@ let deltasSinceFullSave = 0;
 let bytesSinceFullSave = 0;
 let reconcileDue = false;
 /**
- * Set when a record arrives while the ledger is unarmed — i.e. possibly
- * AFTER a poisoned full save took its snapshot but before it armed. Such
- * a mutation is absent from the snapshot and its record was dropped, so
- * arming on that snapshot would let the queued follow-up save noop it
- * away. beginFullSaveSnapshot() clears the flag at snapshot time;
- * armChatSaveLedger refuses to arm while it is set.
+ * Monotonic count of records that arrived while the ledger was unarmed.
+ * A full save captures the counter at its snapshot moment (the token) and
+ * may only arm if the counter is unchanged at ack time — i.e. no unarmed
+ * mutation landed between ITS snapshot and ITS arm. Token-scoped, so an
+ * unrelated concurrent save (a bookmark copy taking its own snapshot)
+ * can never launder another save's window.
  */
-let unarmedMutationSeen = false;
+let unarmedRecordCounter = 0;
 /** @type {ReturnType<typeof setTimeout>|null} */
 let idleTimer = null;
 
@@ -104,7 +104,7 @@ function guardTrackedEntryCap() {
  */
 export function recordChatAppend(index) {
     if (!armed) {
-        unarmedMutationSeen = true;
+        unarmedRecordCounter += 1;
         return;
     }
     appendedIndexes.set(index, armEpoch);
@@ -118,7 +118,7 @@ export function recordChatAppend(index) {
  */
 export function recordChatTouch(index) {
     if (!armed) {
-        unarmedMutationSeen = true;
+        unarmedRecordCounter += 1;
         return;
     }
     touchedIndexes.set(index, armEpoch);
@@ -139,26 +139,29 @@ function parseIntegrity(headerLine) {
 }
 
 /**
+ * Captures the snapshot token at the moment a full save snapshots the
+ * chat (synchronously, before its first await). Unarmed records arriving
+ * after this moment are NOT in that snapshot — they advance the counter
+ * and invalidate the token, blocking that save's arm.
+ * @returns {number} The snapshot token to pass to armChatSaveLedger
+ */
+export function beginFullSaveSnapshot() {
+    return unarmedRecordCounter;
+}
+
+/**
  * Re-arms the ledger after a full save whose exact on-disk state is known.
  * @param {object} ack Ack data
  * @param {string} ack.chatKey Identity of the saved chat file
  * @param {number} ack.lineCount Lines on disk (header + messages)
  * @param {number} ack.fileSize Bytes on disk
  * @param {string} ack.headerLine The exact header line that was written
+ * @param {number} ack.snapshotToken Token from beginFullSaveSnapshot()
  */
-/**
- * Marks the moment a full save snapshots the chat (synchronously, before
- * its first await). Records arriving after this moment while the ledger
- * is unarmed are NOT in the snapshot — they block the subsequent arm.
- */
-export function beginFullSaveSnapshot() {
-    unarmedMutationSeen = false;
-}
-
-export function armChatSaveLedger({ chatKey, lineCount, fileSize, headerLine }) {
+export function armChatSaveLedger({ chatKey, lineCount, fileSize, headerLine, snapshotToken }) {
     if (unsupported) return;
-    if (unarmedMutationSeen) {
-        // A mutation landed while this full save was in flight (its record
+    if (snapshotToken !== unarmedRecordCounter) {
+        // A mutation landed while THIS full save was in flight (its record
         // was dropped and its content is not in the written bytes). Stay
         // fail-closed: the queued follow-up save must be a full save.
         poisonChatSaveLedger('mutation-during-full-save');

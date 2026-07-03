@@ -472,9 +472,45 @@ test.describe('Incremental chat saves', () => {
             // The queued save must NOT have been swallowed as a noop; the
             // hidden flag must reach the disk without waiting for any
             // reconciliation.
-            const serverChat = await fetchServerChat(page, info);
+            let serverChat = await fetchServerChat(page, info);
             expect(serverChat[1].is_system, 'the mid-flight mutation reached the disk').toBe(true);
             expect(traffic.filter(t => t.kind === 'raw').length >= 2, 'the follow-up save stayed a full save').toBe(true);
+
+            // Token-scoping variant: a CONCURRENT alternate-key save (a
+            // bookmark copy taking its own snapshot) must not launder the
+            // in-flight save's window.
+            await page.route('**/api/chats/save-raw*', async (route) => {
+                await new Promise(resolve => setTimeout(resolve, 800));
+                await route.fallback();
+            });
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const { saveChatConditional, saveChat } = await import('/script.js');
+                const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
+                const { hideChatMessageRange } = await import('/scripts/chats.js');
+                poisonChatSaveLedger('race-test-concurrent');
+                const inFlight = saveChatConditional();
+                await new Promise(resolve => setTimeout(resolve, 250));
+                // Unhide message 0 (hidden by the first half) mid-flight,
+                // and fire a concurrent alternate-key copy save.
+                const copySave = saveChat({ chatName: 'e2e-race-copy' });
+                await hideChatMessageRange(0, 0, true);
+                await Promise.all([inFlight, copySave]);
+            });
+            await page.unroute('**/api/chats/save-raw*');
+
+            serverChat = await fetchServerChat(page, info);
+            expect(serverChat[1].is_system, 'the unhide survived the concurrent alternate save').toBe(false);
+
+            // Remove the copy file the alternate save created.
+            await page.evaluate(async ({ avatar }) => {
+                const { getRequestHeaders } = await import('/script.js');
+                await fetch('/api/chats/delete', {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify({ chatfile: 'e2e-race-copy.jsonl', avatar_url: avatar }),
+                });
+            }, info);
         } finally {
             await deleteThrowawayChat(page, info);
         }
