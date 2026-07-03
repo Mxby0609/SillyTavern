@@ -7,11 +7,13 @@ import { describe, expect, it, beforeEach, afterEach } from '@jest/globals';
 import {
     APPEND_JOURNAL_SUFFIX,
     BaseMismatchError,
+    IntegrityConflictError,
     InvalidDeltaError,
     applyChatDelta,
     atomicWriteFile,
     discardAppendJournal,
     enqueueFileOperation,
+    fullSaveWithIntegrityCheck,
     recoverAppendJournal,
     scanJsonlOffsets,
 } from '../src/chat-file-surgery.js';
@@ -196,6 +198,11 @@ describe('chat-file-surgery', () => {
             ['truncate combined with replaceLast', [{ op: 'truncate', fromIndex: 1 }, { op: 'replaceLast', line: '{}' }]],
             ['replace of a truncated message', [{ op: 'truncate', fromIndex: 1 }, { op: 'replace', index: 2, line: '{}' }]],
             ['truncate out of range', [{ op: 'truncate', fromIndex: 3 }]],
+            // Ops are base-relative; canonical order is enforced so a request
+            // can never be misread as sequential.
+            ['replaceLast after an append', [{ op: 'append', lines: ['{"a":1}'] }, { op: 'replaceLast', line: '{}' }]],
+            ['truncate after an append', [{ op: 'append', lines: ['{"a":1}'] }, { op: 'truncate', fromIndex: 1 }]],
+            ['header after an append', [{ op: 'append', lines: ['{"a":1}'] }, { op: 'header', line: '{}' }]],
         ])('rejects %s', async (_label, ops) => {
             const base = writeInitial();
             const before = readFile();
@@ -336,6 +343,61 @@ describe('chat-file-surgery', () => {
             messages.push(message);
             expect(readFile()).toBe(serializeChat(header, messages));
             expect(readFile().startsWith(baseContent)).toBe(true);
+        });
+    });
+
+    describe('fullSaveWithIntegrityCheck', () => {
+        it('writes, discards a pending journal, and passes on a matching slug', async () => {
+            const base = writeInitial();
+            fs.writeFileSync(file + APPEND_JOURNAL_SUFFIX, 'stale');
+            const next = serializeChat(header, [...messages, makeMessage(3, 'full save')]);
+
+            await fullSaveWithIntegrityCheck(file, next, base.integrity);
+            expect(readFile()).toBe(next);
+            expect(fs.existsSync(file + APPEND_JOURNAL_SUFFIX)).toBe(false);
+        });
+
+        it('rejects a slug mismatch and leaves the file untouched', async () => {
+            writeInitial();
+            const before = readFile();
+
+            await expect(fullSaveWithIntegrityCheck(file, '{"fresh":true}', 'wrong-slug'))
+                .rejects.toThrow(IntegrityConflictError);
+            expect(readFile()).toBe(before);
+        });
+
+        it('passes when the file has no slug, does not exist, or no slug is expected', async () => {
+            await fullSaveWithIntegrityCheck(file, '{"a":1}', 'any-slug');
+            expect(readFile()).toBe('{"a":1}');
+
+            header = { chat_metadata: {} };
+            writeInitial();
+            await fullSaveWithIntegrityCheck(file, '{"b":2}', 'any-slug');
+            expect(readFile()).toBe('{"b":2}');
+
+            writeInitial();
+            await fullSaveWithIntegrityCheck(file, '{"c":3}', null);
+            expect(readFile()).toBe('{"c":3}');
+        });
+
+        it('verifies the slug INSIDE the queue: a queued delta that rewrites the header defeats a stale full save', async () => {
+            const base = writeInitial();
+            // Op 1 (queued first): a delta changes the integrity slug — the
+            // same shape a chat restored under a new identity would produce.
+            const newHeader = structuredClone(header);
+            newHeader.chat_metadata.integrity = 'slug-2';
+            const delta = enqueueFileOperation(file, () => applyChatDelta(file, base, [
+                { op: 'header', line: JSON.stringify(newHeader) },
+            ], { enforceIntegrity: true }));
+            // Op 2 (queued in the SAME tick, before op 1 has run): a full
+            // save still expecting the OLD slug. If the check ran before
+            // queueing, it would see slug-1, pass, and overwrite the newer
+            // state; checked inside the queue it must reject.
+            const fullSave = fullSaveWithIntegrityCheck(file, '{"stale":true}', base.integrity);
+
+            await expect(delta).resolves.toBeTruthy();
+            await expect(fullSave).rejects.toThrow(IntegrityConflictError);
+            expect(readFile()).toBe(serializeChat(newHeader, messages));
         });
     });
 

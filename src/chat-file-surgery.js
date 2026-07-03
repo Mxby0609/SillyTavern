@@ -41,6 +41,15 @@ export class InvalidDeltaError extends Error {
     }
 }
 
+/** Thrown when a full save's integrity slug no longer matches the file being overwritten. */
+export class IntegrityConflictError extends Error {
+    /** @param {string} message Reason for the conflict */
+    constructor(message) {
+        super(message);
+        this.name = 'IntegrityConflictError';
+    }
+}
+
 /**
  * @typedef {object} DeltaOp
  * @property {string} op One of: append, header, replaceLast, replace, truncate
@@ -153,21 +162,22 @@ async function readByteRange(filePath, start, length) {
 }
 
 /**
- * Writes a buffer to a file atomically (temp file + fsync + rename).
+ * Writes a buffer to a file atomically (temp file + fsync + rename). The
+ * temp file is removed on any failure.
  * @param {string} filePath Destination path
  * @param {Buffer} buffer Content
  * @returns {Promise<void>}
  */
 export async function atomicWriteFile(filePath, buffer) {
     const tempPath = `${filePath}.tmp-${process.pid}-${++tempCounter}`;
-    const handle = await fs.promises.open(tempPath, 'w');
     try {
-        await handle.writeFile(buffer);
-        await handle.sync();
-    } finally {
-        await handle.close();
-    }
-    try {
+        const handle = await fs.promises.open(tempPath, 'w');
+        try {
+            await handle.writeFile(buffer);
+            await handle.sync();
+        } finally {
+            await handle.close();
+        }
         await fs.promises.rename(tempPath, filePath);
     } catch (error) {
         await fs.promises.unlink(tempPath).catch(() => { });
@@ -184,6 +194,64 @@ export async function atomicWriteFile(filePath, buffer) {
  */
 export async function discardAppendJournal(filePath) {
     await fs.promises.unlink(filePath + APPEND_JOURNAL_SUFFIX).catch(() => { });
+}
+
+/**
+ * Reads the first line of a file without reading the rest.
+ * @param {string} filePath File to read
+ * @returns {Promise<string|null>} The first line, or null if unreadable
+ */
+async function readFirstLineText(filePath) {
+    return new Promise((resolve) => {
+        const chunks = [];
+        const stream = fs.createReadStream(filePath);
+        stream.on('data', (chunk) => {
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            const nl = buffer.indexOf(NEWLINE);
+            if (nl === -1) {
+                chunks.push(buffer);
+                return;
+            }
+            chunks.push(buffer.subarray(0, nl));
+            stream.destroy();
+            resolve(Buffer.concat(chunks).toString('utf8'));
+        });
+        stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        stream.on('error', () => resolve(null));
+    });
+}
+
+/**
+ * @param {string|null} headerText Serialized header line
+ * @returns {string|null} The integrity slug, if any
+ */
+function parseIntegritySlug(headerText) {
+    const slug = headerText === null ? null : tryParseJson(headerText)?.chat_metadata?.integrity;
+    return typeof slug === 'string' ? slug : null;
+}
+
+/**
+ * Atomically replaces a chat file with fully serialized content, verifying
+ * the integrity slug INSIDE the per-file queue — so the check always sees
+ * the state this write would actually overwrite, even when queued behind
+ * delta operations that change the header.
+ * @param {string} filePath Chat file path
+ * @param {string|Buffer} data Full serialized JSONL content
+ * @param {string|null|undefined} expectedIntegrity Slug the file must carry (null/undefined skips the check)
+ * @returns {Promise<void>}
+ */
+export async function fullSaveWithIntegrityCheck(filePath, data, expectedIntegrity) {
+    return enqueueFileOperation(filePath, async () => {
+        if (typeof expectedIntegrity === 'string' && expectedIntegrity.length > 0 && fs.existsSync(filePath)) {
+            const fileSlug = parseIntegritySlug(await readFirstLineText(filePath));
+            if (fileSlug !== null && fileSlug !== expectedIntegrity) {
+                throw new IntegrityConflictError(`Chat integrity check failed for "${filePath}". The expected integrity slug was "${expectedIntegrity}".`);
+            }
+        }
+        await atomicWriteFile(filePath, Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'));
+        // A full rewrite supersedes any append journal left by a pre-crash delta.
+        await discardAppendJournal(filePath);
+    });
 }
 
 /**
@@ -283,6 +351,12 @@ function validateLine(line, label) {
 
 /**
  * Normalizes and validates the op list against the file's line count.
+ *
+ * Op semantics are BASE-RELATIVE, not sequential: every replace/replaceLast/
+ * truncate index refers to the file state declared in `base`, and appends
+ * always land after the (possibly modified) kept lines. To keep requests
+ * unambiguous, canonical order is enforced — once an append op appears, no
+ * header/replace/replaceLast/truncate op may follow.
  * @param {DeltaOp[]} ops Raw ops from the request
  * @param {number} lineCount Current number of lines (header + messages)
  * @returns {{headerLine: string|null, replacements: Map<number, string>, truncateFrom: number|null, appends: string[]}} Normalized plan
@@ -304,6 +378,9 @@ function normalizeOps(ops, lineCount) {
     for (const op of ops) {
         if (op === null || typeof op !== 'object') {
             throw new InvalidDeltaError('each op must be an object');
+        }
+        if (appends.length > 0 && op.op !== 'append') {
+            throw new InvalidDeltaError('ops are base-relative: no header/replace/replaceLast/truncate may follow an append');
         }
         switch (op.op) {
             case 'append': {

@@ -11,11 +11,11 @@ import _ from 'lodash';
 import validateAvatarUrlMiddleware, { forbiddenRegExp } from '../middleware/validateFileName.js';
 import {
     BaseMismatchError,
+    IntegrityConflictError,
     InvalidDeltaError,
     applyChatDelta,
-    atomicWriteFile,
-    discardAppendJournal,
     enqueueFileOperation,
+    fullSaveWithIntegrityCheck,
     recoverAppendJournal,
 } from '../chat-file-surgery.js';
 import {
@@ -25,10 +25,8 @@ import {
     generateTimestamp,
     removeOldBackups,
     formatBytes,
-    tryWriteFileSync,
     tryReadFileSync,
     tryDeleteFile,
-    readFirstLine,
     isPathUnderParent,
 } from '../util.js';
 
@@ -323,33 +321,6 @@ function importRisuChat(userName, characterName, jsonData) {
 }
 
 /**
- * Checks if the chat being saved has the same integrity as the one being loaded.
- * @param {string} filePath Path to the chat file
- * @param {string} integritySlug Integrity slug
- * @returns {Promise<boolean>} Whether the chat is intact
- */
-async function checkChatIntegrity(filePath, integritySlug) {
-    // If the chat file doesn't exist, assume it's intact
-    if (!fs.existsSync(filePath)) {
-        return true;
-    }
-
-    // Parse the first line of the chat file as JSON
-    const firstLine = await readFirstLine(filePath);
-    const jsonData = tryParse(firstLine);
-    const chatIntegrity = jsonData?.chat_metadata?.integrity;
-
-    // If the chat has no integrity metadata, assume it's intact
-    if (!chatIntegrity) {
-        console.debug(`File "${filePath}" does not have integrity metadata matching "${integritySlug}". The integrity validation has been skipped.`);
-        return true;
-    }
-
-    // Check if the integrity matches
-    return chatIntegrity === integritySlug;
-}
-
-/**
  * @typedef {Object} ChatInfo
  * @property {string} [file_id] - The name of the chat file (without extension)
  * @property {string} [file_name] - The name of the chat file (with extension)
@@ -475,14 +446,16 @@ export async function trySaveChat(chatData, filePath, skipIntegrityCheck = false
     const doIntegrityCheck = (checkIntegrity && !skipIntegrityCheck);
     const chatIntegritySlug = doIntegrityCheck ? chatData?.[0]?.chat_metadata?.integrity : undefined;
 
-    if (chatIntegritySlug && !await checkChatIntegrity(filePath, chatIntegritySlug)) {
-        throw new IntegrityMismatchError(`Chat integrity check failed for "${filePath}". The expected integrity slug was "${chatIntegritySlug}".`);
+    try {
+        // The slug is verified inside the per-file queue, against the exact
+        // state this write would overwrite (not a possibly stale snapshot).
+        await fullSaveWithIntegrityCheck(filePath, jsonlData, typeof chatIntegritySlug === 'string' ? chatIntegritySlug : null);
+    } catch (error) {
+        if (error instanceof IntegrityConflictError) {
+            throw new IntegrityMismatchError(error.message);
+        }
+        throw error;
     }
-    await enqueueFileOperation(filePath, async () => {
-        tryWriteFileSync(filePath, jsonlData);
-        // A full rewrite supersedes any append journal left by a pre-crash delta.
-        await discardAppendJournal(filePath);
-    });
     getBackupFunction(handle)(backupDirectory, cardName, filePath);
 }
 
@@ -598,20 +571,23 @@ router.post('/save-raw', rawChatParser, async function (request, response) {
 
         const body = request.body;
         const doIntegrityCheck = (checkIntegrity && !force);
+        let expectedSlug = null;
         if (doIntegrityCheck) {
             const newlineIndex = body.indexOf(0x0A);
             const firstLine = body.subarray(0, newlineIndex === -1 ? body.length : newlineIndex).toString('utf8');
             const chatIntegritySlug = tryParse(firstLine)?.chat_metadata?.integrity;
-            if (chatIntegritySlug && !await checkChatIntegrity(chatFilePath, chatIntegritySlug)) {
-                console.error(`Chat integrity check failed for "${chatFilePath}".`);
-                return response.status(400).send({ error: 'integrity' });
-            }
+            expectedSlug = typeof chatIntegritySlug === 'string' ? chatIntegritySlug : null;
         }
 
-        await enqueueFileOperation(chatFilePath, async () => {
-            await atomicWriteFile(chatFilePath, body);
-            await discardAppendJournal(chatFilePath);
-        });
+        try {
+            await fullSaveWithIntegrityCheck(chatFilePath, body, expectedSlug);
+        } catch (error) {
+            if (error instanceof IntegrityConflictError) {
+                console.error(error.message);
+                return response.status(400).send({ error: 'integrity' });
+            }
+            throw error;
+        }
         getBackupFunction(handle)(request.user.directories.backups, backupName, chatFilePath);
         return response.send({ ok: true });
     } catch (error) {
