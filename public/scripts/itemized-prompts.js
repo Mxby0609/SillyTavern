@@ -23,8 +23,16 @@ export let itemizedPrompts = [];
  * the rewrite entirely. Claimed false BEFORE the write starts so a
  * mutation landing while a write is in flight keeps the array dirty for
  * the next save; restored to true when a write fails.
+ *
+ * The flag describes the array's relation to ITS OWN chat's storage key
+ * (loadedChatId). Bookmarks/branches reuse saveItemizedPrompts with a
+ * DIFFERENT chatId to copy the array under a new key — those copies
+ * always write and never touch the flag.
  */
 let itemizedPromptsDirty = false;
+
+/** @type {string|null} Chat id the in-memory array was loaded for. */
+let loadedChatId = null;
 
 /**
  * Marks the itemized prompts as changed since the last successful write.
@@ -62,6 +70,7 @@ export async function loadItemizedPrompts(chatId) {
         if (!chatId) {
             itemizedPrompts = [];
             itemizedPromptsDirty = false;
+            loadedChatId = null;
             return;
         }
 
@@ -73,12 +82,14 @@ export async function loadItemizedPrompts(chatId) {
 
         // Fresh from storage: memory and storage agree.
         itemizedPromptsDirty = false;
+        loadedChatId = chatId;
 
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_LOADED, { chatId: chatId });
     } catch {
         console.log('Error loading itemized prompts for chat', chatId);
         itemizedPrompts = [];
         itemizedPromptsDirty = false;
+        loadedChatId = chatId;
     }
 }
 
@@ -87,13 +98,24 @@ export async function loadItemizedPrompts(chatId) {
  * @param {string} chatId Chat ID to save itemized prompts for
  */
 export async function saveItemizedPrompts(chatId) {
-    if (!chatId || !itemizedPromptsDirty) {
+    if (!chatId) {
         return;
     }
 
-    // Claim before the write: a mutation arriving while setItem is in
-    // flight re-marks dirty and the NEXT save writes it.
-    itemizedPromptsDirty = false;
+    // The dirty flag only describes the array's own chat. A save under a
+    // DIFFERENT key is a copy (bookmarks/branches): it always writes and
+    // must not claim or clear the flag.
+    const isOwnChat = chatId === loadedChatId;
+
+    if (isOwnChat && !itemizedPromptsDirty) {
+        return;
+    }
+
+    if (isOwnChat) {
+        // Claim before the write: a mutation arriving while setItem is in
+        // flight re-marks dirty and the NEXT save writes it.
+        itemizedPromptsDirty = false;
+    }
 
     try {
         perfMark('itemized-save:start');
@@ -101,7 +123,9 @@ export async function saveItemizedPrompts(chatId) {
         perfMeasure('itemized-save', 'itemized-save:start');
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_SAVED, { chatId: chatId });
     } catch {
-        itemizedPromptsDirty = true;
+        if (isOwnChat) {
+            itemizedPromptsDirty = true;
+        }
         console.log('Error saving itemized prompts for chat', chatId);
     }
 }

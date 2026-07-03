@@ -98,6 +98,64 @@ test.describe('Itemized prompts dirty flag', () => {
         expect(results.afterDeleteRepeat, 'still no writes without changes').toBe(4);
     });
 
+    test('bookmark/branch copies always write and never touch the own-chat flag', async ({ page }) => {
+        const results = await page.evaluate(async ({ SALT }) => {
+            const { saveChatConditional } = await import('/script.js');
+            const itemized = await import('/scripts/itemized-prompts.js');
+            const { eventSource, event_types } = await import('/scripts/events.js');
+            const context = globalThis.SillyTavern.getContext();
+
+            if (context.characterId === undefined && context.characters.length) {
+                await context.executeSlashCommandsWithOptions(`/go ${context.characters[0].name}`);
+            }
+
+            const store = globalThis.SillyTavern.libs.localforage.createInstance({ name: 'SillyTavern_Prompts' });
+            const ownChatId = context.getCurrentChatId();
+            const branchChatId = `e2e-branch-copy-${SALT}`;
+            const settle = () => new Promise(resolve => setTimeout(resolve, 200));
+
+            try {
+                // Settle the own store to a clean state.
+                await saveChatConditional();
+                await settle();
+
+                // Bookmarks/branches copy the CURRENT array under a NEW
+                // chat id. With a clean own store this must still write.
+                await itemized.saveItemizedPrompts(branchChatId);
+                const cleanCopy = await store.getItem(branchChatId);
+                const cleanCopyWritten = Array.isArray(cleanCopy);
+
+                // A copy made while the own store is dirty must not eat
+                // the own store's pending write.
+                itemized.upsertItemizedPrompt({ mesId: 990010, rawPrompt: 'branch probe' });
+                await itemized.saveItemizedPrompts(branchChatId);
+                const branchCopy = await store.getItem(branchChatId);
+                const branchCopyHasProbe = (branchCopy ?? []).some(x => x.mesId === 990010);
+
+                let ownWrites = 0;
+                const onSaved = (payload) => {
+                    if (payload?.chatId === ownChatId) {
+                        ownWrites++;
+                    }
+                };
+                eventSource.on(event_types.ITEMIZED_PROMPTS_SAVED, onSaved);
+                await saveChatConditional();
+                await settle();
+                eventSource.removeListener(event_types.ITEMIZED_PROMPTS_SAVED, onSaved);
+
+                return { cleanCopyWritten, branchCopyHasProbe, ownWrites };
+            } finally {
+                await store.removeItem(branchChatId);
+                itemized.deleteItemizedPromptForMessage(990010);
+                await saveChatConditional();
+            }
+        }, { SALT: Date.now().toString(36) });
+
+        expect(results.cleanCopyWritten, 'a clean own store still copies to the branch key').toBe(true);
+        expect(results.branchCopyHasProbe, 'the dirty-state copy carries the new entry').toBe(true);
+        expect(results.ownWrites, 'the copy does not clear the own-chat dirty flag').toBe(1);
+    });
+
     test('replaceItemizedPromptText result is persisted on the next save', async ({ page }) => {
         const roundTrip = await page.evaluate(async () => {
             const { saveChatConditional } = await import('/script.js');
