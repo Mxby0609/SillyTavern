@@ -58,6 +58,8 @@ let deletedEntryIds = new Set();
 let indexDirty = false;
 /** @type {string|null} Chat id the in-memory state was loaded for. */
 let loadedChatId = null;
+/** Serializes own-chat save writes (callers fire saveItemizedPrompts without awaiting). */
+let ownSaveChain = Promise.resolve();
 
 const indexKey = (chatId) => `${chatId}${INDEX_SUFFIX}`;
 const entryKey = (chatId, id) => `${chatId}${ENTRY_INFIX}${id}`;
@@ -247,35 +249,52 @@ export async function saveItemizedPrompts(chatId) {
             if (!dirtyEntryIds.size && !deletedEntryIds.size && !indexDirty) {
                 return;
             }
-            // Claim before the write: mutations landing while the writes
-            // are in flight re-mark and the NEXT save picks them up.
-            const claimedDirty = dirtyEntryIds;
-            const claimedDeleted = deletedEntryIds;
-            const claimedIndexDirty = indexDirty;
-            dirtyEntryIds = new Set();
-            deletedEntryIds = new Set();
-            indexDirty = false;
-            try {
-                perfMark('itemized-save:start');
-                for (const id of claimedDirty) {
-                    const entry = hydratedEntries.get(id);
-                    if (entry) {
-                        await promptStorage.setItem(entryKey(chatId, id), entry);
+            // Serialize own-chat saves: callers fire this without awaiting,
+            // so a second save must not interleave with (or be outrun by)
+            // the writes of the first.
+            const run = ownSaveChain.then(async () => {
+                if (!dirtyEntryIds.size && !deletedEntryIds.size && !indexDirty) {
+                    return false;
+                }
+                // Claim before the write: mutations landing while the writes
+                // are in flight re-mark and the NEXT save picks them up. The
+                // index is SNAPSHOTTED at claim time — writing the live
+                // array could persist references to entries whose bodies
+                // were added after this claim and are not written yet.
+                const claimedDirty = dirtyEntryIds;
+                const claimedDeleted = deletedEntryIds;
+                const claimedIndex = indexDirty ? promptIndex.map(meta => ({ ...meta })) : null;
+                dirtyEntryIds = new Set();
+                deletedEntryIds = new Set();
+                indexDirty = false;
+                try {
+                    perfMark('itemized-save:start');
+                    for (const id of claimedDirty) {
+                        const entry = hydratedEntries.get(id);
+                        if (entry) {
+                            await promptStorage.setItem(entryKey(chatId, id), entry);
+                        }
                     }
+                    for (const id of claimedDeleted) {
+                        await promptStorage.removeItem(entryKey(chatId, id));
+                    }
+                    if (claimedIndex !== null) {
+                        await promptStorage.setItem(indexKey(chatId), claimedIndex);
+                    }
+                    perfMeasure('itemized-save', 'itemized-save:start');
+                    return true;
+                } catch (error) {
+                    // Restore the claim so nothing is lost for the next save.
+                    for (const id of claimedDirty) dirtyEntryIds.add(id);
+                    for (const id of claimedDeleted) deletedEntryIds.add(id);
+                    indexDirty = indexDirty || claimedIndex !== null;
+                    throw error;
                 }
-                for (const id of claimedDeleted) {
-                    await promptStorage.removeItem(entryKey(chatId, id));
-                }
-                if (claimedIndexDirty) {
-                    await promptStorage.setItem(indexKey(chatId), promptIndex);
-                }
-                perfMeasure('itemized-save', 'itemized-save:start');
-            } catch (error) {
-                // Restore the claim so nothing is lost for the next save.
-                for (const id of claimedDirty) dirtyEntryIds.add(id);
-                for (const id of claimedDeleted) deletedEntryIds.add(id);
-                indexDirty = indexDirty || claimedIndexDirty;
-                throw error;
+            });
+            ownSaveChain = run.catch(() => { });
+            const wrote = await run;
+            if (!wrote) {
+                return;
             }
         } else {
             // Bookmark/branch copy: full shard set under the new chat id.

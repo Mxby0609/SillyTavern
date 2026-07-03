@@ -250,6 +250,52 @@ test.describe('Itemized prompts sharded storage', () => {
         expect(results.hydratedKeepsFields, 'hydration preserves the other entry fields').toBe(true);
     });
 
+    test('an in-flight own save never persists an index entry without its body', async ({ page }) => {
+        const results = await page.evaluate(async ({ INDEX_SUFFIX, ENTRY_INFIX }) => {
+            const itemized = await import('/scripts/itemized-prompts.js');
+            const context = globalThis.SillyTavern.getContext();
+            if (context.characterId === undefined && context.characters.length) {
+                await context.executeSlashCommandsWithOptions(`/go ${context.characters[0].name}`);
+            }
+            const store = globalThis.SillyTavern.libs.localforage.createInstance({ name: 'SillyTavern_Prompts' });
+            const chatId = context.getCurrentChatId();
+            const out = {};
+            try {
+                itemized.upsertItemizedPrompt({ mesId: 990401, rawPrompt: 'first ' + 'X'.repeat(200000) });
+                const saveA = itemized.saveItemizedPrompts(chatId);
+                // Let saveA claim (its runner starts on a microtask), then
+                // land a NEW entry while its writes are in flight.
+                await new Promise(resolve => setTimeout(resolve, 0));
+                itemized.upsertItemizedPrompt({ mesId: 990402, rawPrompt: 'second (mid-flight)' });
+                await saveA;
+
+                // Reload from storage WITHOUT a repair save: whatever the
+                // index lists must have a body.
+                await itemized.loadItemizedPrompts(chatId);
+                const index = await store.getItem(chatId + INDEX_SUFFIX) ?? [];
+                out.orphanIds = [];
+                for (const meta of index) {
+                    const body = await store.getItem(chatId + ENTRY_INFIX + meta.id);
+                    if (!body) out.orphanIds.push(meta.mesId);
+                }
+                out.hasFirst = index.some(x => x.mesId === 990401);
+            } finally {
+                // Clean both probes (and any stray body) then persist.
+                const index = await store.getItem(chatId + INDEX_SUFFIX) ?? [];
+                for (const meta of index.filter(x => x.mesId === 990401 || x.mesId === 990402)) {
+                    await store.removeItem(chatId + ENTRY_INFIX + meta.id);
+                }
+                itemized.deleteItemizedPromptForMessage(990401);
+                itemized.deleteItemizedPromptForMessage(990402);
+                await itemized.saveItemizedPrompts(chatId);
+            }
+            return out;
+        }, { INDEX_SUFFIX, ENTRY_INFIX });
+
+        expect(results.orphanIds, 'no index entry points at a missing body').toEqual([]);
+        expect(results.hasFirst, 'the claimed entry landed').toBe(true);
+    });
+
     test('bookmark/branch copies write a full shard set and never touch the own-chat dirt', async ({ page }) => {
         const results = await page.evaluate(async ({ INDEX_SUFFIX, ENTRY_INFIX, SALT }) => {
             const { saveChatConditional } = await import('/script.js');
