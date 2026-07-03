@@ -9,9 +9,15 @@
  * Usage:
  *   node perf/generate-fixtures.js [--messages 1000] [--entries 300]
  *     [--data-root ./data] [--user default-user] [--avatar default_Seraphina.png]
+ *     [--chat-name PerfBench-200k] [--swipes 0]
+ *
+ * --swipes N gives every assistant message N extra swipes (on top of the
+ * displayed one), modeling a heavy swipe user whose chat FILE is much larger
+ * than the visible conversation. 0 (default) keeps the original behavior of
+ * a second swipe on ~10% of assistant messages.
  *
  * Output:
- *   data/<user>/chats/<avatar-without-png>/PerfBench-200k.jsonl
+ *   data/<user>/chats/<avatar-without-png>/<chat-name>.jsonl
  *   data/<user>/worlds/PerfBench.json
  *
  * Deterministic: same arguments always produce identical files (seeded PRNG),
@@ -27,8 +33,9 @@ const ENTRY_COUNT = Number(args.entries ?? 300);
 const DATA_ROOT = String(args['data-root'] ?? './data');
 const USER_HANDLE = String(args.user ?? 'default-user');
 const AVATAR = String(args.avatar ?? 'default_Seraphina.png');
+const EXTRA_SWIPES = Number(args.swipes ?? 0);
 
-const CHAT_FILE_NAME = 'PerfBench-200k';
+const CHAT_FILE_NAME = String(args['chat-name'] ?? 'PerfBench-200k');
 const WORLD_NAME = 'PerfBench';
 const USER_NAME = 'User';
 const CHAR_NAME = 'Seraphina';
@@ -116,7 +123,17 @@ function generateChat(count) {
         };
 
         // Give some assistant messages a second swipe to mirror real chats.
-        if (!isUser && rng() < 0.1) {
+        // With --swipes N, EVERY assistant message carries N extra swipes
+        // instead (heavy-swiper file-size model).
+        if (!isUser && EXTRA_SWIPES > 0) {
+            message.swipe_id = 0;
+            message.swipes = [message.mes];
+            message.swipe_info = [{}];
+            for (let s = 0; s < EXTRA_SWIPES; s++) {
+                message.swipes.push(generateMessageText(rng, i, false));
+                message.swipe_info.push({});
+            }
+        } else if (!isUser && rng() < 0.1) {
             message.swipe_id = 0;
             message.swipes = [message.mes, generateMessageText(rng, i, false)];
             message.swipe_info = [{}, {}];

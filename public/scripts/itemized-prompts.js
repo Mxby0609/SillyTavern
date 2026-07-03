@@ -7,6 +7,7 @@ import { power_user, registerDebugFunction } from './power-user.js';
 import { isMobile } from './RossAscends-mods.js';
 import { renderTemplateAsync } from './templates.js';
 import { getFriendlyTokenizerName, getTokenCountAsync } from './tokenizers.js';
+import { perfMark, perfMeasure } from './perf-metrics.js';
 import { copyText } from './utils.js';
 
 let PromptArrayItemForRawPromptDisplay;
@@ -49,7 +50,9 @@ export async function saveItemizedPrompts(chatId) {
             return;
         }
 
+        perfMark('itemized-save:start');
         await promptStorage.setItem(chatId, itemizedPrompts);
+        perfMeasure('itemized-save', 'itemized-save:start');
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_SAVED, { chatId: chatId });
     } catch {
         console.log('Error saving itemized prompts for chat', chatId);

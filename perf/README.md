@@ -19,7 +19,24 @@ Creates (deterministic — same args, same bytes):
   keys, 30% keys matching chat keywords, 7% recursion-only, 3% constant.
 
 Options: `--messages 1000 --entries 300 --data-root ./data --user default-user
---avatar default_Seraphina.png`
+--avatar default_Seraphina.png --chat-name PerfBench-200k --swipes 0`
+
+`--swipes N` gives every assistant message N extra swipes — models a heavy
+swipe user whose chat FILE is much larger than the visible conversation
+(save/serialize cost scales with the file, not the visible text).
+
+**Do NOT regenerate `PerfBench-200k.jsonl`.** The on-disk file has been
+round-tripped through the app's own save (the save-chat scenario rewrites
+it), so its bytes no longer match raw generator output — and all recorded
+stage results in `perf/results/` were measured against those exact bytes
+(md5 `23ac82b61f8c486dabd489493ec6eede`). If it gets clobbered, restore a
+matching copy from `data/default-user/backups/`.
+
+The phone-emulation fixture is separate and safe to (re)generate:
+
+```bash
+node perf/generate-fixtures.js --messages 1200 --chat-name PerfBench-300k --swipes 2
+```
 
 ## 2. Instrumentation
 
@@ -46,6 +63,7 @@ Instrumented spans:
 | `chat-save` | Chat serialization + upload | script.js |
 | `tokencache-save` | Token cache write to IndexedDB (per-chat shards, idle-deferred) | tokenizers.js |
 | `stream-tick` | Accumulated per-tick streaming cost | script.js |
+| `itemized-save` | Itemized-prompts array write to IndexedDB (whole array, every save) | itemized-prompts.js |
 
 ## 3. Scripted baseline
 
@@ -72,6 +90,25 @@ PERF_STAGE=after-1.1 npx playwright test perf-baseline --workers 1
 
 Manual scenarios (need a live LLM backend, not covered by the script):
 long-reply streaming (`stream-tick`), non-OpenAI `checkPromptSize` overflow.
+
+## 4. Phone emulation (production = Android/Termux)
+
+`tests/frontend/perf-phone.e2e.js` reproduces the phone environment: CPU
+throttled 6x via CDP (`PERF_CPU_RATE` to override), the 300k heavy-swipes
+fixture, context raised to 300k. Measures the reported freeze actions end
+to end (open chat, preflight cold/hot, swipe between existing replies,
+append user message, bare save, stream + STOP) and quantifies main-thread
+freezes per scenario with a `longtask` observer (`freeze.blockedMs`).
+Skipped unless `PERF_PHONE` is set — it never runs in the plain suite:
+
+```bash
+cd tests && PERF_PHONE=1 PERF_STAGE=phone6x-optimized \
+  npx playwright test perf-phone --workers 1
+```
+
+Chat saves are fulfilled locally in this spec (serialization + gzip still
+run; only the server write is skipped), so fixture files stay byte-stable
+across runs.
 
 ## Measurement discipline
 
