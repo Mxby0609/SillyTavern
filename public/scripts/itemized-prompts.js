@@ -99,7 +99,8 @@ async function hydrateEntry(chatId, id) {
     if (body === null || typeof body !== 'object') {
         return null;
     }
-    body.mesId = meta.mesId;
+    // rebuildArrayView stamps the index's authoritative mesId onto every
+    // hydrated body — no separate stamp needed here.
     hydratedEntries.set(id, body);
     rebuildArrayView();
     return body;

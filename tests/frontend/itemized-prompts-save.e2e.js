@@ -56,6 +56,11 @@ test.describe('Itemized prompts sharded storage', () => {
                 await saveAndSettle();
                 counts.afterPushRepeat = writes - settled;
 
+                // Re-upsert of the SAME mesId (regeneration overwrite).
+                itemized.upsertItemizedPrompt({ mesId: 990001, rawPrompt: 'probe one regenerated' });
+                await saveAndSettle();
+                counts.afterReupsert = writes - settled;
+
                 await itemized.replaceItemizedPromptText(990001, 'probe one edited');
                 await saveAndSettle();
                 counts.afterReplace = writes - settled;
@@ -82,10 +87,11 @@ test.describe('Itemized prompts sharded storage', () => {
         expect(results.cleanSaveAdds, 'a save with no changes does not write').toBe(0);
         expect(results.afterPush, 'a pushed entry triggers exactly one write').toBe(1);
         expect(results.afterPushRepeat, 'an unchanged follow-up save stays silent').toBe(1);
-        expect(results.afterReplace, 'editing an entry triggers a write').toBe(2);
-        expect(results.afterSwap, 'swapping message ids triggers a write').toBe(3);
-        expect(results.afterDelete, 'deleting an entry triggers a write').toBe(4);
-        expect(results.afterDeleteRepeat, 'still no writes without changes').toBe(4);
+        expect(results.afterReupsert, 'overwriting an existing entry triggers a write').toBe(2);
+        expect(results.afterReplace, 'editing an entry triggers a write').toBe(3);
+        expect(results.afterSwap, 'swapping message ids triggers a write').toBe(4);
+        expect(results.afterDelete, 'deleting an entry triggers a write').toBe(5);
+        expect(results.afterDeleteRepeat, 'still no writes without changes').toBe(5);
     });
 
     test('shard layout: entries land under id keys, deletes remove them, swaps survive a reload', async ({ page }) => {
@@ -286,7 +292,13 @@ test.describe('Itemized prompts sharded storage', () => {
                 await settle();
                 eventSource.removeListener(event_types.ITEMIZED_PROMPTS_SAVED, onSaved);
 
-                return { cleanCopyWritten, branchEntryOk: branchEntry?.rawPrompt === 'own entry', branchCopyHasProbe, ownWrites };
+                // The copy must not have eaten the own ENTRY write either
+                // (an index-only write would still fire the event).
+                const ownIndex = await store.getItem(ownChatId + INDEX_SUFFIX);
+                const ownMeta = (ownIndex ?? []).find(x => x.mesId === 990302);
+                const ownEntry = ownMeta ? await store.getItem(ownChatId + ENTRY_INFIX + ownMeta.id) : null;
+
+                return { cleanCopyWritten, branchEntryOk: branchEntry?.rawPrompt === 'own entry', branchCopyHasProbe, ownWrites, ownEntryOk: ownEntry?.rawPrompt === 'branch probe' };
             } finally {
                 const branchIndex = await store.getItem(branchChatId + INDEX_SUFFIX);
                 for (const meta of branchIndex ?? []) {
@@ -303,5 +315,6 @@ test.describe('Itemized prompts sharded storage', () => {
         expect(results.branchEntryOk, 'the branch copy carries the entry body').toBe(true);
         expect(results.branchCopyHasProbe, 'the dirty-state copy carries the new entry').toBe(true);
         expect(results.ownWrites, 'the copy does not eat the own chat pending write').toBe(1);
+        expect(results.ownEntryOk, 'the own entry body reached its own key').toBe(true);
     });
 });
