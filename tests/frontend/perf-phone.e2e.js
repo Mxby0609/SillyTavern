@@ -213,9 +213,10 @@ test.describe('Phone-emulation performance', () => {
         // --- Scenario: stream a long reply, then STOP mid-stream ---
         // Real StreamingProcessor driven by a fake generator; the stop tail
         // mirrors script.js:5443 (onFinishStreaming: final render + save).
-        // Run twice: with auto-scroll (production default) and without —
-        // the delta attributes streaming-period main-thread saturation to
-        // the per-frame scroll-to-bottom (scrollHeight read = forced layout).
+        // Run twice: with auto-scroll (production default) and without.
+        // Measured verdict: the delta is negligible — scroll-to-bottom is
+        // REFUTED as the primary streaming cost; saturation comes from the
+        // per-tick DOM replacement itself (parse/style/layout/GC).
         const withScroll = await runStreamingScenario(page);
         results['streaming-run-4s'] = withScroll.run;
         results['streaming-stop'] = withScroll.stop;
