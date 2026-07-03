@@ -735,6 +735,11 @@ export async function init() {
                 }
                 try {
                     await captionExistingMessage(message, mediaIndex);
+                    // MESSAGE_SENT fires AFTER the message was saved, so
+                    // this mutation sits below the ledger's acknowledged
+                    // base — without the touch the caption would wait for
+                    // a reconciliation full save instead of the next save.
+                    recordChatTouch(messageId);
                 } catch (e) {
                     console.error(`Auto-captioning failed for message ID ${messageId}, media index ${mediaIndex}`, e);
                     continue;

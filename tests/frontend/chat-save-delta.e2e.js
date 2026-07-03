@@ -324,6 +324,38 @@ test.describe('Incremental chat saves', () => {
             serverChat = await fetchServerChat(page, info);
             const captionedMedia = serverChat[serverChat.length - 1].extra?.media?.[0];
             expect(captionedMedia?.title ?? '', 'the caption reached the disk').toContain('mocked caption 图注');
+
+            // AUTO-caption: MESSAGE_SENT fires AFTER the message was saved,
+            // so the caption mutation sits below the acknowledged base. The
+            // NEXT hot save must carry it — not a reconciliation later.
+            await page.route('**/api/extra/caption', route => route.fulfill({
+                status: 200, contentType: 'application/json', body: JSON.stringify({ caption: 'auto caption 自动' }),
+            }));
+            await sendUserMessage(page, 'message with an uploaded image');
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const { chat, saveChat } = await import('/script.js');
+                const { eventSource, event_types } = await import('/scripts/events.js');
+                const { extension_settings } = await import('/scripts/extensions.js');
+                extension_settings.caption.auto_mode = true;
+                try {
+                    const messageId = chat.length - 1;
+                    chat[messageId].extra = { ...(chat[messageId].extra ?? {}), media: [{ url: '/img/ai4.png', type: 'image', source: 'upload', title: '' }], media_index: 0 };
+                    await eventSource.emit(event_types.MESSAGE_SENT, messageId);
+                    for (let i = 0; i < 50; i++) {
+                        if (chat[messageId].extra.media[0].captioned) break;
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    await saveChat();
+                } finally {
+                    extension_settings.caption.auto_mode = false;
+                }
+            });
+            await page.unroute('**/api/extra/caption');
+            expect(traffic.length > 0, 'the post-auto-caption save was not treated as a noop').toBe(true);
+            serverChat = await fetchServerChat(page, info);
+            const autoCaptioned = serverChat[serverChat.length - 1].extra?.media?.[0];
+            expect(autoCaptioned?.title ?? '', 'the auto caption reached the disk on the next save').toContain('auto caption 自动');
         } finally {
             await deleteThrowawayChat(page, info);
         }
