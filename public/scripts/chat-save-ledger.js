@@ -79,6 +79,12 @@ export function poisonChatSaveLedger(reason) {
     if (armed) {
         console.debug(`Chat save ledger poisoned (${reason}); next save is a full save.`);
     }
+    // Poison sites are mutation sites too (reorders, middle inserts, bulk
+    // rewrites). Advancing the counter invalidates any full-save window
+    // currently in flight, exactly like an unarmed record — otherwise a
+    // same-length poisoned mutation landing mid-save could arm a stale
+    // snapshot and let the queued save noop the change away.
+    unarmedRecordCounter += 1;
     armed = false;
     base = null;
     appendedIndexes.clear();

@@ -441,6 +441,7 @@ test.describe('Incremental chat saves', () => {
     test('a mutation landing while a poisoned full save is in flight is not swallowed', async ({ page }) => {
         const info = await openThrowawayChat(page);
         const { traffic } = info;
+        const raceCopyName = `e2e-race-copy-${Date.now().toString(36)}`;
         try {
             await sendUserMessage(page, 'base one');
             await sendUserMessage(page, 'base two');
@@ -459,11 +460,7 @@ test.describe('Incremental chat saves', () => {
                 const { hideChatMessageRange } = await import('/scripts/chats.js');
                 poisonChatSaveLedger('race-test');
                 const inFlight = saveChatConditional();
-                // Let the save take its snapshot and start its request.
                 await new Promise(resolve => setTimeout(resolve, 250));
-                // A wired same-length mutation: its touch is dropped (the
-                // ledger is unarmed) and its content is NOT in the snapshot.
-                // hideChatMessageRange also queues its own save.
                 await hideChatMessageRange(0, 0, false);
                 await inFlight;
             });
@@ -484,6 +481,7 @@ test.describe('Incremental chat saves', () => {
                 await route.fallback();
             });
             traffic.length = 0;
+            await page.evaluate((name) => { globalThis.__raceCopyName = name; }, raceCopyName);
             await page.evaluate(async () => {
                 const { saveChatConditional, saveChat } = await import('/script.js');
                 const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
@@ -499,7 +497,7 @@ test.describe('Incremental chat saves', () => {
                 // global flag cleared there would launder the touch; the
                 // token design must not.
                 const hidePromise = hideChatMessageRange(0, 0, true);
-                const copySave = saveChat({ chatName: 'e2e-race-copy' });
+                const copySave = saveChat({ chatName: globalThis.__raceCopyName });
                 await Promise.all([inFlight, hidePromise, copySave]);
             });
             await page.unroute('**/api/chats/save-raw*');
@@ -507,15 +505,57 @@ test.describe('Incremental chat saves', () => {
             serverChat = await fetchServerChat(page, info);
             expect(serverChat[1].is_system, 'the unhide survived the concurrent alternate save').toBe(false);
 
-            // Remove the copy file the alternate save created.
-            await page.evaluate(async ({ avatar }) => {
+        } finally {
+            // Remove the copy file the alternate save created (in FINALLY:
+            // a leftover from a failed run would collide with later runs
+            // and hang the integrity-overwrite popup).
+            await page.evaluate(async ({ avatar, name }) => {
                 const { getRequestHeaders } = await import('/script.js');
                 await fetch('/api/chats/delete', {
                     method: 'POST',
                     headers: getRequestHeaders(),
-                    body: JSON.stringify({ chatfile: 'e2e-race-copy.jsonl', avatar_url: avatar }),
+                    body: JSON.stringify({ chatfile: `${name}.jsonl`, avatar_url: avatar }),
                 });
-            }, info);
+            }, { avatar: info.avatar, name: raceCopyName }).catch(() => {});
+            await deleteThrowawayChat(page, info);
+        }
+    });
+
+    test('a poison-only same-length mutation mid-flight also invalidates the window', async ({ page }) => {
+        const info = await openThrowawayChat(page);
+        const { traffic } = info;
+        try {
+            await sendUserMessage(page, 'base one');
+            await sendUserMessage(page, 'base two');
+            await page.waitForTimeout(1200);
+
+            await page.route('**/api/chats/save-raw*', async (route) => {
+                await new Promise(resolve => setTimeout(resolve, 800));
+                await route.fallback();
+            });
+
+            // Mid-flight REORDER (the messageEditMove shape): it poisons but
+            // records nothing and changes neither length nor header — only
+            // the poison-advanced counter can invalidate the stale window.
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const { chat, saveChat, saveChatConditional } = await import('/script.js');
+                const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
+                poisonChatSaveLedger('race-test-move');
+                const inFlight = saveChatConditional();
+                await new Promise(resolve => setTimeout(resolve, 250));
+                // Message 0 is the character greeting; swap the two sends.
+                [chat[1], chat[2]] = [chat[2], chat[1]];
+                poisonChatSaveLedger('mid-flight-move');
+                await inFlight;
+                await saveChat();
+            });
+            await page.unroute('**/api/chats/save-raw*');
+
+            const serverChat = await fetchServerChat(page, info);
+            expect(serverChat[2].mes, 'the reorder reached the disk (row 1)').toBe('base two');
+            expect(serverChat[3].mes, 'the reorder reached the disk (row 2)').toBe('base one');
+            expect(traffic.filter(t => t.kind === 'delta').length, 'no delta armed off the stale window').toBe(0);
         } finally {
             await deleteThrowawayChat(page, info);
         }
