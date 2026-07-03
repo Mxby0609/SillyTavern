@@ -198,7 +198,6 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
 
     const baseMessageCount = base.lineCount - 1;
     const appendCount = chatLength - baseMessageCount;
-    if (appendCount < 0) return null;
     // An append below the base line count is either a PRE-ARM leftover —
     // provably inside the arming full save's snapshot (mid-save appends
     // always land at >= baseMessageCount, since pushes extend the array
@@ -212,6 +211,8 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
             touchedIndexes.add(index);
         }
     }
+    // Also rejects any unrecorded shrink: a negative appendCount can never
+    // equal the (non-negative) recorded size.
     if (appendedIndexes.size !== appendCount) return null;
     for (let index = baseMessageCount; index < chatLength; index++) {
         if (!appendedIndexes.has(index)) return null;
