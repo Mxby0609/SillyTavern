@@ -1061,6 +1061,8 @@ export function setWorldInfoSettings(settings, data) {
     eventSource.on(event_types.CHAT_CHANGED, async () => {
         const hasWorldInfo = !!chat_metadata[METADATA_KEY] && world_names.includes(chat_metadata[METADATA_KEY]);
         $('.chat_lorebook_button').toggleClass('world_set', hasWorldInfo);
+        // Books cached for other chats/characters are no longer needed.
+        evictUnusedWorldInfoCacheBooks();
         // Pre-cache the world info data for the chat for quicker first prompt generation
         await getSortedEntries();
     });
@@ -4635,6 +4637,46 @@ function getSortedEntriesBookNames() {
         names.add(book);
     }
     return names;
+}
+
+/**
+ * Evicts cached books that are no longer relevant to the current context:
+ * not in the applicable set (global/chat/persona/character books), not a
+ * group member's book, and not open in the editor. Dropping a cache entry
+ * never loses data - books reload from the server on next access, and the
+ * cache hands out clones, so nothing holds references into it.
+ */
+export function evictUnusedWorldInfoCacheBooks() {
+    const keep = getSortedEntriesBookNames();
+
+    const editorBook = String($('#world_editor_select').find(':selected').text());
+    if (editorBook) {
+        keep.add(editorBook);
+    }
+
+    // In group chats the character books of every member stay relevant, not
+    // just those of the member whose turn it currently is.
+    const context = getContext();
+    if (context.groupId) {
+        const group = context.groups?.find((g) => g.id === context.groupId);
+        for (const avatar of group?.members ?? []) {
+            const character = context.characters?.find((c) => c.avatar === avatar);
+            if (character?.data?.extensions?.world) {
+                keep.add(character.data.extensions.world);
+            }
+            const memberFileName = getCharaFilename(null, { manualAvatarKey: avatar });
+            const memberCharLore = world_info.charLore?.find((e) => e.name === memberFileName);
+            for (const book of memberCharLore?.extraBooks ?? []) {
+                keep.add(book);
+            }
+        }
+    }
+
+    for (const name of [...worldInfoCache.keys()]) {
+        if (!keep.has(name)) {
+            worldInfoCache.delete(name);
+        }
+    }
 }
 
 export async function getSortedEntries() {
