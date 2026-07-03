@@ -231,9 +231,11 @@ export async function recoverAppendJournal(filePath) {
     }
 
     const tailLength = stats.size - header.baseSize;
-    if (tailLength < 0 || tailLength > header.byteLength) {
-        // File shrank below the journaled base or grew beyond the intended
-        // append: a foreign write happened. Leave the file alone.
+    if (tailLength < 0) {
+        // File shrank below the journaled base: a foreign write happened.
+        // (Foreign GROWTH needs no guard here — a tail longer than the
+        // payload can never equal a payload prefix, so the proof below
+        // rejects it.)
         await removeJournal();
         return;
     }
@@ -403,19 +405,16 @@ export async function applyChatDelta(filePath, base, ops, options = {}) {
 
     await recoverAppendJournal(filePath);
 
-    let stats;
+    let scan;
     try {
-        stats = await fs.promises.stat(filePath);
+        scan = await scanJsonlOffsets(filePath);
     } catch {
-        throw new BaseMismatchError('chat file does not exist');
+        // Missing/unreadable file: the client falls back to a full save,
+        // which either creates the file or surfaces the real IO error.
+        throw new BaseMismatchError('chat file cannot be read');
     }
-    if (stats.size !== base.fileSize) {
-        throw new BaseMismatchError(`file size ${stats.size} != expected ${base.fileSize}`);
-    }
-
-    const scan = await scanJsonlOffsets(filePath);
     if (scan.size !== base.fileSize || scan.offsets.length !== base.lineCount) {
-        throw new BaseMismatchError(`line count ${scan.offsets.length} != expected ${base.lineCount}`);
+        throw new BaseMismatchError(`file state ${scan.offsets.length} lines / ${scan.size} bytes != expected ${base.lineCount} / ${base.fileSize}`);
     }
 
     if (options.enforceIntegrity && typeof base.integrity === 'string' && base.integrity.length > 0) {
