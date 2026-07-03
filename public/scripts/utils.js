@@ -1459,7 +1459,12 @@ export class Stopwatch {
  *
  * When no frame signal arrives between executions (hidden tab: rAF does
  * not fire), the interval is left unchanged rather than grown — no signal
- * is not evidence of overload.
+ * is not evidence of overload. A probe that fires late (tab suspended
+ * mid-probe) is bounded by the pre-EMA cost cap in observeRenderCost.
+ *
+ * Note: the UI constrains streaming_fps to 5-100, so a user-configured
+ * base interval is at most 200ms; MAX_INTERVAL_MS(250) only ever
+ * stretches, never tightens, a configured rate.
  */
 export class AdaptiveStopwatch extends Stopwatch {
     // Headroom 2.0 targets <=50% main-thread occupancy from streaming
@@ -1504,13 +1509,23 @@ export class AdaptiveStopwatch extends Stopwatch {
      * Feeds one observed per-render cost into the controller and re-derives
      * the interval: EMA of the cost, times a headroom factor, clamped to
      * [base, MAX_INTERVAL_MS]. Deterministic — exercised directly by tests.
+     *
+     * The cost is capped BEFORE entering the EMA at the value where the
+     * interval already sits at its floor (MAX/HEADROOM): larger readings
+     * carry no additional signal, but an uncapped outlier — a rAF probe
+     * that slept through tab suspension and reports seconds of "lag" —
+     * would poison the average and pin the throttle at the floor long
+     * after the page is healthy again. (The cap also makes the final
+     * Math.min a provably redundant belt-and-suspenders bound.)
      * @param {number} costMs Observed cost of one render in milliseconds
      */
     observeRenderCost(costMs) {
+        const costCap = AdaptiveStopwatch.MAX_INTERVAL_MS / AdaptiveStopwatch.HEADROOM_FACTOR;
+        const cost = Math.min(costMs, costCap);
         const weight = AdaptiveStopwatch.EMA_WEIGHT;
         this.renderCostEma = this.renderCostEma === 0
-            ? costMs
-            : (this.renderCostEma * (1 - weight)) + (costMs * weight);
+            ? cost
+            : (this.renderCostEma * (1 - weight)) + (cost * weight);
         this.interval = Math.min(
             Math.max(this.renderCostEma * AdaptiveStopwatch.HEADROOM_FACTOR, this.baseInterval),
             AdaptiveStopwatch.MAX_INTERVAL_MS,

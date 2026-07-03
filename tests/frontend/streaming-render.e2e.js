@@ -238,12 +238,27 @@ test.describe('Streaming render', () => {
             const recovered = sw.interval;
             const minSeen = Math.min(...track);
 
+            // A rAF probe that slept through tab suspension reports the
+            // suspension time, not a render cost. The pre-EMA cap must
+            // bound its influence: after one such outlier, a few healthy
+            // frames bring the interval back to base. Without the cap the
+            // poisoned average keeps the throttle at the floor for dozens
+            // of frames.
+            sw.observeRenderCost(60000);
+            const afterStaleProbe = sw.interval;
+            for (let i = 0; i < 8; i++) {
+                sw.observeRenderCost(10);
+            }
+            const recoveredAfterStaleProbe = sw.interval;
+
             return {
                 initialInterval,
                 stretched,
                 clamped,
                 recovered,
                 minSeen,
+                afterStaleProbe,
+                recoveredAfterStaleProbe,
                 base: sw.baseInterval,
                 max: AdaptiveStopwatch.MAX_INTERVAL_MS,
             };
@@ -252,9 +267,15 @@ test.describe('Streaming render', () => {
         expect(results.initialInterval, 'starts at the user-configured base').toBe(33);
         expect(results.stretched, 'a 90ms-per-render load stretches the interval well past base').toBeGreaterThan(results.base * 2);
         expect(results.stretched, 'stretching stays within the floor cap').toBeLessThanOrEqual(results.max);
-        expect(results.clamped, 'pathological load clamps at the ~4fps floor').toBe(results.max);
+        // The pre-EMA cost cap makes the EMA approach its ceiling
+        // asymptotically, so the floored interval converges on MAX
+        // without landing exactly on it.
+        expect(results.clamped, 'pathological load converges on the ~4fps floor').toBeGreaterThanOrEqual(results.max - 1);
+        expect(results.clamped, 'the floor is never exceeded').toBeLessThanOrEqual(results.max);
         expect(results.recovered, 'a healthy thread decays the interval back to base').toBe(results.base);
         expect(results.minSeen, 'the interval never dips below the user-configured base').toBeGreaterThanOrEqual(results.base);
+        expect(results.afterStaleProbe, 'a stale probe may floor the interval momentarily').toBeLessThanOrEqual(results.max);
+        expect(results.recoveredAfterStaleProbe, 'one stale probe cannot poison recovery: back to base within 8 healthy frames').toBe(results.base);
     });
 
     test('a throttled stream still persists the full final text with a fresh final render', async ({ page }) => {
