@@ -258,6 +258,8 @@ export class ReasoningHandler {
     #isHiddenReasoningModel;
     /** @type {boolean} True if the handler is currently handling a manual parse of reasoning blocks */
     #isParsingReasoning = false;
+    /** @type {{input: string, messageId: number}?} Inputs of the last reasoning display render */
+    #displayMemo = null;
     /** @type {number?} When reasoning is being parsed manually, and the reasoning has ended, this will be the index at which the actual messages starts */
     #parsingReasoningMesStartIndex = null;
 
@@ -550,14 +552,20 @@ export class ReasoningHandler {
         setDatasetProperty(this.messageReasoningDetailsDom, 'state', this.state);
         setDatasetProperty(this.messageReasoningDetailsDom, 'type', this.type);
 
-        // Update the reasoning message
+        // Update the reasoning message. During streaming this runs on every
+        // tick, but once the reasoning text is frozen (the reply body is
+        // streaming), re-formatting and re-writing identical markup is pure
+        // waste - skip when the inputs of the last render are unchanged.
         const reasoning = trimSpaces(this.reasoningDisplayText ?? this.reasoning);
-        const displayReasoning = messageFormatting(reasoning, '', false, false, messageId, {}, true);
+        if (this.#displayMemo?.input !== reasoning || this.#displayMemo?.messageId !== messageId) {
+            const displayReasoning = messageFormatting(reasoning, '', false, false, messageId, {}, true);
 
-        if (power_user.stream_fade_in) {
-            applyStreamFadeIn(this.messageReasoningContentDom, displayReasoning);
-        } else {
-            this.messageReasoningContentDom.innerHTML = displayReasoning;
+            if (power_user.stream_fade_in) {
+                applyStreamFadeIn(this.messageReasoningContentDom, displayReasoning);
+            } else {
+                this.messageReasoningContentDom.innerHTML = displayReasoning;
+            }
+            this.#displayMemo = { input: reasoning, messageId };
         }
 
         // Update tooltip for hidden reasoning edit
