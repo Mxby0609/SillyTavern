@@ -204,4 +204,136 @@ test.describe('Streaming render', () => {
         expect(results.finalSwipe, 'the final tick bypasses the memo before persisting').toBe('SRPROBE_gamma');
         expect(results.ticks[4], 'fresh stream data is always cleaned').toBe('SRPROBE_gamma');
     });
+
+    test('adaptive stopwatch stretches under load, recovers when idle, respects bounds', async ({ page }) => {
+        const results = await page.evaluate(async () => {
+            const { AdaptiveStopwatch } = await import('/scripts/utils.js');
+
+            const BASE = 33;
+            const sw = new AdaptiveStopwatch(BASE);
+            const initialInterval = sw.interval;
+
+            // The controller is deterministic: feed it observed render
+            // costs directly (the probe wiring is covered by the streamed
+            // pin test below and by the phone-emulation A/B).
+            const track = [];
+            // A slow device: each render costs ~90ms.
+            for (let i = 0; i < 8; i++) {
+                sw.observeRenderCost(90);
+                track.push(sw.interval);
+            }
+            const stretched = sw.interval;
+
+            // Pathological load never exceeds the ~4fps floor.
+            for (let i = 0; i < 10; i++) {
+                sw.observeRenderCost(2000);
+            }
+            const clamped = sw.interval;
+
+            // A healthy thread (~10ms per render) decays back to base.
+            for (let i = 0; i < 30; i++) {
+                sw.observeRenderCost(10);
+                track.push(sw.interval);
+            }
+            const recovered = sw.interval;
+            const minSeen = Math.min(...track);
+
+            // A rAF probe that slept through tab suspension reports the
+            // suspension time, not a render cost. The pre-EMA cap must
+            // bound its influence: after one such outlier, a few healthy
+            // frames bring the interval back to base. Without the cap the
+            // poisoned average keeps the throttle at the floor for dozens
+            // of frames.
+            sw.observeRenderCost(60000);
+            const afterStaleProbe = sw.interval;
+            for (let i = 0; i < 8; i++) {
+                sw.observeRenderCost(10);
+            }
+            const recoveredAfterStaleProbe = sw.interval;
+
+            return {
+                initialInterval,
+                stretched,
+                clamped,
+                recovered,
+                minSeen,
+                afterStaleProbe,
+                recoveredAfterStaleProbe,
+                base: sw.baseInterval,
+                max: AdaptiveStopwatch.MAX_INTERVAL_MS,
+            };
+        });
+
+        expect(results.initialInterval, 'starts at the user-configured base').toBe(33);
+        expect(results.stretched, 'a 90ms-per-render load stretches the interval well past base').toBeGreaterThan(results.base * 2);
+        expect(results.stretched, 'stretching stays within the floor cap').toBeLessThanOrEqual(results.max);
+        // The pre-EMA cost cap makes the EMA approach its ceiling
+        // asymptotically, so the floored interval converges on MAX
+        // without landing exactly on it.
+        expect(results.clamped, 'pathological load converges on the ~4fps floor').toBeGreaterThanOrEqual(results.max - 1);
+        expect(results.clamped, 'the floor is never exceeded').toBeLessThanOrEqual(results.max);
+        expect(results.recovered, 'a healthy thread decays the interval back to base').toBe(results.base);
+        expect(results.minSeen, 'the interval never dips below the user-configured base').toBeGreaterThanOrEqual(results.base);
+        expect(results.afterStaleProbe, 'a stale probe may floor the interval momentarily').toBeLessThanOrEqual(results.max);
+        expect(results.recoveredAfterStaleProbe, 'one stale probe cannot poison recovery: back to base within 8 healthy frames').toBe(results.base);
+    });
+
+    test('a throttled stream still persists the full final text with a fresh final render', async ({ page }) => {
+        const results = await page.evaluate(async () => {
+            const { chat, redisplayChat, StreamingProcessor, messageFormatting } = await import('/script.js');
+            const { PromptReasoning } = await import('/scripts/reasoning.js');
+
+            const base = chat.length;
+            chat.push({ name: 'TestChar', is_user: false, is_system: false, send_date: 0, mes: '...', extra: {} });
+
+            try {
+                await redisplayChat({ startIndex: base, fade: false });
+
+                const processor = new StreamingProcessor('normal', false, new Date(), '', new PromptReasoning());
+                processor.stoppingStrings = [];
+                processor.messageId = base;
+                if (!processor.abortController) {
+                    processor.abortController = new AbortController();
+                }
+
+                // Stream fast with a per-tick main-thread hog: the adaptive
+                // throttle must skip intermediate renders (fewer executed
+                // ticks than yields) yet the finalize path must persist the
+                // complete last text and render it fresh.
+                let finalText = '';
+                processor.generator = async function* () {
+                    for (let i = 1; i <= 30; i++) {
+                        finalText = Array.from({ length: i }, (_, n) => `word${n}`).join(' ');
+                        const end = performance.now() + 25;
+                        while (performance.now() < end) { /* hog */ }
+                        yield { text: finalText, swipes: [], logprobs: null, toolCalls: [], state: {} };
+                        await new Promise(resolve => setTimeout(resolve, 5));
+                    }
+                    // Tail burst with no timer gaps: the throttle cannot
+                    // render any of these, so the complete final text may
+                    // only survive through the unconditional per-yield
+                    // accumulation — the exact guarantee this test pins.
+                    for (let i = 31; i <= 36; i++) {
+                        finalText = Array.from({ length: i }, (_, n) => `word${n}`).join(' ');
+                        yield { text: finalText, swipes: [], logprobs: null, toolCalls: [], state: {} };
+                    }
+                };
+
+                await processor.generate();
+                await processor.onFinishStreaming(base, processor.result);
+
+                const persisted = chat[base].mes;
+                const renderedHtml = document.querySelector(`#chat .mes[mesid="${base}"] .mes_text`)?.innerHTML;
+                const expectedHtml = messageFormatting(finalText, chat[base].name, false, false, base, {}, false);
+
+                return { persisted, finalText, renderedHtml, expectedHtml };
+            } finally {
+                chat.splice(base);
+                document.querySelector(`#chat .mes[mesid="${base}"]`)?.remove();
+            }
+        });
+
+        expect(results.persisted, 'the complete final text is persisted despite skipped frames').toBe(results.finalText);
+        expect(results.renderedHtml, 'the final DOM equals a fresh full format of the final text').toBe(results.expectedHtml);
+    });
 });

@@ -162,7 +162,7 @@ import {
     onlyUnique,
     getBase64Async,
     humanFileSize,
-    Stopwatch,
+    AdaptiveStopwatch,
     isValidUrl,
     ensureImageFormatSupported,
     flashHighlight,
@@ -3843,7 +3843,10 @@ export class StreamingProcessor {
         this.stoppingStrings = getStoppingStrings(isImpersonate, isContinue, main_api);
 
         try {
-            const sw = new Stopwatch(1000 / power_user.streaming_fps);
+            // Adaptive: the user's streaming FPS stays the ceiling, but on
+            // hardware where a render costs more than the frame budget the
+            // interval stretches (floor ~4fps) so the page stays responsive.
+            const sw = new AdaptiveStopwatch(1000 / power_user.streaming_fps);
             const timestamps = [];
             for await (const { text, swipes, logprobs, toolCalls, state } of this.generator()) {
                 const now = Date.now();

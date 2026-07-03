@@ -1442,6 +1442,123 @@ export class Stopwatch {
 }
 
 /**
+ * A Stopwatch that adapts its interval to the device's real rendering
+ * headroom. Used for streaming DOM updates: on weak hardware the browser's
+ * per-update work (HTML parse, style, layout, GC) can cost several times
+ * the script time, so throttling on script time alone under-throttles
+ * exactly when it matters.
+ *
+ * Signal: after each executed action, a requestAnimationFrame timestamps
+ * how long the browser took to produce the next frame. That lag includes
+ * the browser-internal cost of our own DOM write plus any main-thread
+ * congestion — a direct "missed frames" detector. The signal feeds an
+ * exponential moving average; the interval is the averaged cost times a
+ * headroom factor, clamped between the caller's base interval (the user's
+ * configured rate stays the ceiling frequency) and MAX_INTERVAL_MS (a
+ * floor of ~4 renders/second so text visibly advances even when starved).
+ *
+ * When no frame signal arrives between executions (hidden tab: rAF does
+ * not fire), the interval is left unchanged rather than grown — no signal
+ * is not evidence of overload. A probe that fires late (tab suspended
+ * mid-probe) is bounded by the pre-EMA cost cap in observeRenderCost.
+ *
+ * Note: the UI constrains streaming_fps to 5-100, so a user-configured
+ * base interval is at most 200ms; MAX_INTERVAL_MS(250) only ever
+ * stretches, never tightens, a configured rate.
+ */
+export class AdaptiveStopwatch extends Stopwatch {
+    // Headroom 2.0 targets <=50% main-thread occupancy from streaming
+    // renders on any device speed: interval = observed render cost x2, so
+    // at least half the thread stays free for input. The user's configured
+    // rate remains the ceiling (interval never drops below base).
+    static MAX_INTERVAL_MS = 250;
+    static HEADROOM_FACTOR = 2.0;
+    static EMA_WEIGHT = 0.4;
+
+    /**
+     * @param {number} interval Base update interval in milliseconds — the
+     * fastest the action is allowed to run (user-configured rate).
+     */
+    constructor(interval) {
+        super(interval);
+        this.baseInterval = this.interval;
+        this.renderCostEma = 0;
+        this.pendingFrameProbe = false;
+    }
+
+    /**
+     * Executes the action if the adapted interval passed, then re-adapts
+     * from the observed cost of this execution.
+     * @param {(arg0: any) => any} action Action function
+     * @returns {Promise<void>}
+     */
+    async tick(action) {
+        const passed = (Date.now() - this.lastAction);
+
+        if (passed < this.interval) {
+            return;
+        }
+
+        const started = performance.now();
+        await action();
+        this.lastAction = Date.now();
+        this.#probeRenderCost(performance.now() - started);
+    }
+
+    /**
+     * Feeds one observed per-render cost into the controller and re-derives
+     * the interval: EMA of the cost, times a headroom factor, clamped to
+     * [base, MAX_INTERVAL_MS]. Deterministic — exercised directly by tests.
+     *
+     * The cost is capped BEFORE entering the EMA at the value where the
+     * interval already sits at its floor (MAX/HEADROOM): larger readings
+     * carry no additional signal, but an uncapped outlier — a rAF probe
+     * that slept through tab suspension and reports seconds of "lag" —
+     * would poison the average and pin the throttle at the floor long
+     * after the page is healthy again. (The cap also makes the final
+     * Math.min a provably redundant belt-and-suspenders bound.)
+     * @param {number} costMs Observed cost of one render in milliseconds
+     */
+    observeRenderCost(costMs) {
+        const costCap = AdaptiveStopwatch.MAX_INTERVAL_MS / AdaptiveStopwatch.HEADROOM_FACTOR;
+        const cost = Math.min(costMs, costCap);
+        const weight = AdaptiveStopwatch.EMA_WEIGHT;
+        this.renderCostEma = this.renderCostEma === 0
+            ? cost
+            : (this.renderCostEma * (1 - weight)) + (cost * weight);
+        this.interval = Math.min(
+            Math.max(this.renderCostEma * AdaptiveStopwatch.HEADROOM_FACTOR, this.baseInterval),
+            AdaptiveStopwatch.MAX_INTERVAL_MS,
+        );
+    }
+
+    /**
+     * Combines the script cost of the executed action with the time the
+     * browser then needs to start the next frame (rAF lag — queued style/
+     * layout and main-thread congestion the script span cannot see), and
+     * feeds the larger of the two into the controller. When a probe is
+     * already pending or rAF is unavailable (hidden tab, non-browser), the
+     * script cost alone is used — absence of a frame signal is not treated
+     * as overload.
+     * @param {number} scriptCostMs Time the action itself took
+     */
+    #probeRenderCost(scriptCostMs) {
+        if (this.pendingFrameProbe || typeof requestAnimationFrame !== 'function') {
+            this.observeRenderCost(scriptCostMs);
+            return;
+        }
+
+        this.pendingFrameProbe = true;
+        const started = performance.now();
+        requestAnimationFrame(() => {
+            this.pendingFrameProbe = false;
+            const frameLag = performance.now() - started;
+            this.observeRenderCost(Math.max(scriptCostMs, frameLag));
+        });
+    }
+}
+
+/**
  * Provides an interface for rate limiting function calls.
  */
 export class RateLimiter {
