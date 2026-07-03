@@ -264,16 +264,24 @@ export async function saveItemizedPrompts(chatId) {
                 const claimedDirty = dirtyEntryIds;
                 const claimedDeleted = deletedEntryIds;
                 const claimedIndex = indexDirty ? promptIndex.map(meta => ({ ...meta })) : null;
+                // Bodies are snapshotted at claim time too: a mid-flight
+                // DELETE drops an entry from the live map, and reading live
+                // during the awaited writes could skip a body the claimed
+                // index still references (an orphan until the next save).
+                const claimedEntries = new Map();
+                for (const id of claimedDirty) {
+                    const entry = hydratedEntries.get(id);
+                    if (entry) {
+                        claimedEntries.set(id, entry);
+                    }
+                }
                 dirtyEntryIds = new Set();
                 deletedEntryIds = new Set();
                 indexDirty = false;
                 try {
                     perfMark('itemized-save:start');
-                    for (const id of claimedDirty) {
-                        const entry = hydratedEntries.get(id);
-                        if (entry) {
-                            await promptStorage.setItem(entryKey(chatId, id), entry);
-                        }
+                    for (const [id, entry] of claimedEntries) {
+                        await promptStorage.setItem(entryKey(chatId, id), entry);
                     }
                     for (const id of claimedDeleted) {
                         await promptStorage.removeItem(entryKey(chatId, id));

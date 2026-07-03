@@ -282,6 +282,17 @@ test.describe('Itemized prompts sharded storage', () => {
                 itemized.upsertItemizedPrompt({ mesId: 990402, rawPrompt: 'second (mid-flight)' });
                 await saveA;
 
+                // Variant: TWO claimed entries, and the LATER one is
+                // deleted while the save is between its body writes — the
+                // claimed index still references it, so its body snapshot
+                // must have been taken at claim time.
+                itemized.upsertItemizedPrompt({ mesId: 990403, rawPrompt: 'third ' + 'X'.repeat(200000) });
+                itemized.upsertItemizedPrompt({ mesId: 990404, rawPrompt: 'fourth (deleted mid-flight)' });
+                const saveB = itemized.saveItemizedPrompts(chatId);
+                await new Promise(resolve => setTimeout(resolve, 0));
+                itemized.deleteItemizedPromptForMessage(990404);
+                await saveB;
+
                 // Reload from storage WITHOUT a repair save: whatever the
                 // index lists must have a body.
                 await itemized.loadItemizedPrompts(chatId);
@@ -298,8 +309,9 @@ test.describe('Itemized prompts sharded storage', () => {
                 for (const meta of index.filter(x => x.mesId === 990401 || x.mesId === 990402)) {
                     await store.removeItem(chatId + ENTRY_INFIX + meta.id);
                 }
-                itemized.deleteItemizedPromptForMessage(990401);
-                itemized.deleteItemizedPromptForMessage(990402);
+                for (const mesId of [990401, 990402, 990403, 990404]) {
+                    itemized.deleteItemizedPromptForMessage(mesId);
+                }
                 await itemized.saveItemizedPrompts(chatId);
             }
             return out;
