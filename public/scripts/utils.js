@@ -992,12 +992,19 @@ export function formatTime(seconds) {
  * countOccurrences('Hello, world!', 'x'); // 0
  */
 export function countOccurrences(string, character) {
-    let count = 0;
+    // Preserves the substring-scan semantics (overlapping matches count, an
+    // empty needle matches at every index) without allocating a substring per
+    // position - this runs over the full text on every streaming tick.
+    if (character.length === 0) {
+        return string.length;
+    }
 
-    for (let i = 0; i < string.length; i++) {
-        if (string.substring(i, i + character.length) === character) {
-            count++;
-        }
+    let count = 0;
+    let position = string.indexOf(character);
+
+    while (position !== -1) {
+        count++;
+        position = string.indexOf(character, position + 1);
     }
 
     return count;

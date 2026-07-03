@@ -3492,7 +3492,7 @@ function hideStopButton() {
     }
 }
 
-class StreamingProcessor {
+export class StreamingProcessor {
     /**
      * Creates a new streaming processor.
      * @param {string} type Generation type
@@ -3527,6 +3527,8 @@ class StreamingProcessor {
         this.createdAt = new Date();
         this.continueMessage = type === 'continue' ? continueMessage : '';
         this.swipes = [];
+        /** @type {{input: string, output: string}[]} Last cleanup result per swipe index */
+        this.swipeCleanupMemos = [];
         /** @type {import('./scripts/logprobs.js').TokenLogprobs[]} */
         this.messageLogprobs = [];
         this.toolCalls = [];
@@ -3602,13 +3604,26 @@ class StreamingProcessor {
 
         if (!isImpersonate && !isContinue && Array.isArray(this.swipes) && this.swipes.length > 0) {
             for (let i = 0; i < this.swipes.length; i++) {
+                // A swipe whose text did not change since it was last cleaned
+                // keeps its previous result instead of re-running the cleanup
+                // (user regex + stopping strings) over it on every tick. The
+                // final tick always cleans fresh: its result is persisted into
+                // the message, so it must reflect the current state of any
+                // macros the cleanup depends on.
+                const memo = this.swipeCleanupMemos[i];
+                if (!isFinal && memo && memo.input === this.swipes[i]) {
+                    this.swipes[i] = memo.output;
+                    continue;
+                }
+                const input = this.swipes[i];
                 this.swipes[i] = cleanUpMessage({
-                    getMessage: this.swipes[i],
+                    getMessage: input,
                     isImpersonate: false,
                     isContinue: false,
                     displayIncompleteSentences: true,
                     stoppingStrings: this.stoppingStrings,
                 });
+                this.swipeCleanupMemos[i] = { input, output: this.swipes[i] };
             }
         }
 
