@@ -49,6 +49,12 @@ test.describe('Chat save serializer', () => {
                 setRequestCompressionConfig({ enabled: false, minPayloadSize: 0, maxPayloadSize: 0, timeout: 5000 });
                 const plain = await serializeChatSaveOffThread(payload);
 
+                // Compression on but timeout 0: gzip cannot finish in time,
+                // so — mirroring compressRequest's timeout semantics — the
+                // save goes out PLAIN (not null, no inline fallback).
+                setRequestCompressionConfig({ enabled: true, minPayloadSize: 0, maxPayloadSize: 0, timeout: 0 });
+                const timedOut = await serializeChatSaveOffThread(payload);
+
                 const decoder = new TextDecoder();
                 return {
                     compressedGzipFlag: compressed?.gzip ?? null,
@@ -56,6 +62,9 @@ test.describe('Chat save serializer', () => {
                     compressedDecodes: compressed ? decoder.decode(await gunzip(compressed.body)) === inlineJson : null,
                     plainGzipFlag: plain?.gzip ?? null,
                     plainDecodes: plain ? decoder.decode(plain.body) === inlineJson : null,
+                    timedOutIsNull: timedOut === null,
+                    timedOutGzipFlag: timedOut?.gzip ?? null,
+                    timedOutDecodes: timedOut ? decoder.decode(timedOut.body) === inlineJson : null,
                 };
             } finally {
                 setRequestCompressionConfig(previousConfig);
@@ -67,6 +76,9 @@ test.describe('Chat save serializer', () => {
         expect(results.compressedDecodes, 'gzipped body decompresses to the exact inline JSON').toBe(true);
         expect(results.plainGzipFlag, 'disabled compression returns plain bytes').toBe(false);
         expect(results.plainDecodes, 'plain body decodes to the exact inline JSON').toBe(true);
+        expect(results.timedOutIsNull, 'compression timeout is not a worker failure').toBe(false);
+        expect(results.timedOutGzipFlag, 'compression timeout sends plain, like compressRequest').toBe(false);
+        expect(results.timedOutDecodes, 'timed-out body still decodes to the exact inline JSON').toBe(true);
     });
 
     test('uncloneable payloads fall back to null instead of throwing', async ({ page }) => {
