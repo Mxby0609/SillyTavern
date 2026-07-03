@@ -147,6 +147,14 @@ test.describe('Phone-emulation performance', () => {
         });
         results['assemble-prompt-hot'] = await collectMeters(page, wallMs);
 
+        // Arm the delta ledger with one un-metered full save, so every hot
+        // scenario below measures its real (delta) save path instead of one
+        // of them absorbing the arming full save.
+        await page.evaluate(async () => {
+            await globalThis.SillyTavern.getContext().saveChat();
+        });
+        await page.waitForTimeout(SETTLE_MS);
+
         // --- Scenario: swipe between EXISTING replies (render + save) ---
         // Every fixture assistant message has 3 swipes; the last message is
         // an assistant one, so the arrows are present.
@@ -169,13 +177,30 @@ test.describe('Phone-emulation performance', () => {
         await page.waitForTimeout(SETTLE_MS);
         results['send-user-message'] = await collectMeters(page, wallMs);
 
-        // --- Scenario: bare full-chat save (the shared tail) ---
+        // --- Scenario: FULL chat save (the R3.2 fallback/reconciliation
+        // path — poison first so the ledger cannot serve a delta). This is
+        // the number comparable with earlier rounds' save-chat. ---
         await resetMeters(page);
         wallMs = await timeEvaluate(page, async () => {
+            const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
+            poisonChatSaveLedger('perf-full-save-scenario');
             await globalThis.SillyTavern.getContext().saveChat();
         });
         await waitForMeasure(page, 'tokencache-save', MEASURE_TIMEOUT_MS);
         results['save-chat'] = await collectMeters(page, wallMs);
+
+        // --- Scenario: DELTA save of one touched message (the new hot
+        // path for swipe/stop/edit saves). The full save above re-armed
+        // the ledger. ---
+        await resetMeters(page);
+        wallMs = await timeEvaluate(page, async () => {
+            const { chat } = await import('/script.js');
+            const { recordChatTouch } = await import('/scripts/chat-save-ledger.js');
+            recordChatTouch(chat.length - 1);
+            await globalThis.SillyTavern.getContext().saveChat();
+        });
+        await waitForMeasure(page, 'tokencache-save', MEASURE_TIMEOUT_MS);
+        results['save-chat-delta'] = await collectMeters(page, wallMs);
 
         // --- Scenario: itemized-prompts persistence (real generations only,
         // so absent from the synthetic scenarios above). Every generated
