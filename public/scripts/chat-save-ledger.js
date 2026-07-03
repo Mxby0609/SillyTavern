@@ -199,10 +199,6 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
     if (reconcileDue || deltasSinceFullSave >= RECONCILE_AFTER_DELTAS || bytesSinceFullSave >= RECONCILE_AFTER_BYTES) return null;
 
     const baseMessageCount = base.lineCount - 1;
-    // The chat can never shrink below the acknowledged base through
-    // recorded ops (only appends and in-place touches exist) — a shorter
-    // chat means an unrecorded delete: fail closed.
-    if (chatLength < baseMessageCount) return null;
     const appendCount = chatLength - baseMessageCount;
     // An append below the base line count is either a PRE-ARM leftover —
     // provably inside the arming full save's snapshot (mid-save appends
@@ -224,7 +220,8 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
             appendedIndexes.delete(index);
         }
     }
-    // The record COUNT must match the growth. An unrecorded GROWTH from an
+    // The record COUNT must match the growth (a negative growth — an
+    // unrecorded shrink — can never match either). An unrecorded GROWTH from an
     // unknown writer is not append-shaped in general — a middle INSERT
     // shifts every following row, and serializing only the tail would
     // write a shifted-stale middle to disk (real corruption, not merely

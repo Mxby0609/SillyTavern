@@ -387,6 +387,21 @@ test.describe('Incremental chat saves', () => {
             const autoCaptioned = serverChat[serverChat.length - 1].extra?.media?.[0];
             expect(autoCaptioned?.title ?? '', 'the auto caption reached the disk on the next save').toContain('auto caption 自动');
 
+        } finally {
+            await deleteThrowawayChat(page, info);
+        }
+    });
+
+    test('slash role changes and checkpoint links persist without a nudge from neighbors', async ({ page }) => {
+        const info = await openThrowawayChat(page);
+        const { traffic } = info;
+        try {
+            await sendUserMessage(page, 'base one');
+            await sendUserMessage(page, 'base two');
+            // Drain any pending debounced save so the assertions below
+            // cannot be satisfied by a late save from the setup.
+            await page.waitForTimeout(1200);
+
             // /message-role: a same-length slash mutation of message 0.
             traffic.length = 0;
             await page.evaluate(async () => {
@@ -394,7 +409,7 @@ test.describe('Incremental chat saves', () => {
                 await context.executeSlashCommandsWithOptions('/message-role at=0 system');
             });
             expect(traffic.length > 0, 'the role change was not treated as a noop').toBe(true);
-            serverChat = await fetchServerChat(page, info);
+            let serverChat = await fetchServerChat(page, info);
             expect(serverChat[1].is_user, 'the role change reached the disk').toBe(false);
             expect(serverChat[1].extra?.type, 'the narrator marker reached the disk').toBeTruthy();
 
