@@ -663,7 +663,10 @@ router.post('/get', validateAvatarUrlMiddleware, async function (request, respon
         const chatFilePath = path.join(directoryPath, sanitize(chatFileName));
 
         // Finish any append interrupted by a crash before serving the file.
-        await enqueueFileOperation(chatFilePath, () => recoverAppendJournal(chatFilePath));
+        // Best-effort: a recovery failure must never blank the chat response.
+        await enqueueFileOperation(chatFilePath, () => recoverAppendJournal(chatFilePath)).catch((error) => {
+            console.error(`Append journal recovery failed for "${chatFilePath}"`, error);
+        });
 
         return response.send(getChatData(chatFilePath));
     } catch (error) {
