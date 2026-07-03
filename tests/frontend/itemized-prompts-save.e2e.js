@@ -75,6 +75,18 @@ test.describe('Itemized prompts sharded storage', () => {
 
                 await saveAndSettle();
                 counts.afterDeleteRepeat = writes - settled;
+
+                // Two same-tick saves over ONE pending change: the first
+                // claims it, the queued second must re-check and stay
+                // silent (no write event for a no-op pass).
+                itemized.upsertItemizedPrompt({ mesId: 990001, rawPrompt: 'concurrent probe' });
+                const chatId = context.getCurrentChatId();
+                await Promise.all([
+                    itemized.saveItemizedPrompts(chatId),
+                    itemized.saveItemizedPrompts(chatId),
+                ]);
+                await new Promise(resolve => setTimeout(resolve, 200));
+                counts.afterConcurrentPair = writes - settled;
             } finally {
                 eventSource.removeListener(event_types.ITEMIZED_PROMPTS_SAVED, onSaved);
                 itemized.deleteItemizedPromptForMessage(990002);
@@ -92,6 +104,7 @@ test.describe('Itemized prompts sharded storage', () => {
         expect(results.afterSwap, 'swapping message ids triggers a write').toBe(4);
         expect(results.afterDelete, 'deleting an entry triggers a write').toBe(5);
         expect(results.afterDeleteRepeat, 'still no writes without changes').toBe(5);
+        expect(results.afterConcurrentPair, 'a same-tick save pair writes exactly once').toBe(6);
     });
 
     test('shard layout: entries land under id keys, deletes remove them, swaps survive a reload', async ({ page }) => {
