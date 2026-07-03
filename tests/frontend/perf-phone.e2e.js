@@ -41,7 +41,8 @@ import { test, expect } from '@playwright/test';
  *     npx playwright test perf-phone --workers 1
  */
 
-const CHAT_FILE = 'PerfBench-300k';
+const CHAT_FILE = process.env.PERF_CHAT_FILE ?? 'PerfBench-300k';
+const MIN_MESSAGES = Number(process.env.PERF_MIN_MESSAGES ?? 1100);
 const WORLD_NAME = 'PerfBench';
 const CHARACTER_NAME = 'Seraphina';
 const CPU_THROTTLE = Number(process.env.PERF_CPU_RATE ?? 6);
@@ -117,7 +118,7 @@ test.describe('Phone-emulation performance', () => {
         results['open-chat'] = await collectMeters(page, wallMs);
 
         const messageCount = await page.evaluate(() => globalThis.SillyTavern.getContext().chat.length);
-        expect(messageCount).toBeGreaterThan(1100);
+        expect(messageCount).toBeGreaterThan(MIN_MESSAGES);
 
         // --- Scenario: send preflight, cold token cache for this chat ---
         await resetMeters(page);
