@@ -1,0 +1,361 @@
+{
+  "_meta": {
+    "cpuThrottle": 6,
+    "chatFile": "PerfBench-300k",
+    "contextTokens": 300000
+  },
+  "open-chat": {
+    "wallMs": 1485,
+    "freeze": {
+      "blockedMs": 1253,
+      "blocks": 3,
+      "longestMs": 1046
+    },
+    "spans": {
+      "itemized-save": {
+        "count": 1,
+        "totalMs": 14.5,
+        "avgMs": 14.5,
+        "maxMs": 14.5
+      },
+      "chat-render": {
+        "count": 1,
+        "totalMs": 562.6,
+        "avgMs": 562.6,
+        "maxMs": 562.6
+      }
+    }
+  },
+  "assemble-prompt-cold": {
+    "wallMs": 1856,
+    "freeze": {
+      "blockedMs": 489,
+      "blocks": 5,
+      "longestMs": 172
+    },
+    "spans": {
+      "gen-preflight": {
+        "count": 1,
+        "totalMs": 1846.3,
+        "avgMs": 1846.3,
+        "maxMs": 1846.3
+      },
+      "wi-scan": {
+        "count": 1,
+        "totalMs": 668.7,
+        "avgMs": 668.7,
+        "maxMs": 668.7
+      },
+      "oai-populate": {
+        "count": 1,
+        "totalMs": 1113.1,
+        "avgMs": 1113.1,
+        "maxMs": 1113.1
+      }
+    }
+  },
+  "assemble-prompt-hot": {
+    "wallMs": 542,
+    "freeze": {
+      "blockedMs": 541,
+      "blocks": 1,
+      "longestMs": 541
+    },
+    "spans": {
+      "gen-preflight": {
+        "count": 1,
+        "totalMs": 541.6,
+        "avgMs": 541.6,
+        "maxMs": 541.6
+      },
+      "wi-scan": {
+        "count": 1,
+        "totalMs": 178.7,
+        "avgMs": 178.7,
+        "maxMs": 178.7
+      },
+      "oai-populate": {
+        "count": 1,
+        "totalMs": 325.1,
+        "avgMs": 325.1,
+        "maxMs": 325.1
+      }
+    }
+  },
+  "swipe-existing": {
+    "wallMs": 285,
+    "freeze": {
+      "blockedMs": 1017,
+      "blocks": 5,
+      "longestMs": 328
+    },
+    "spans": {
+      "chat-save": {
+        "count": 1,
+        "totalMs": 204.6,
+        "avgMs": 204.6,
+        "maxMs": 204.6
+      },
+      "itemized-save": {
+        "count": 1,
+        "totalMs": 2.3,
+        "avgMs": 2.3,
+        "maxMs": 2.3
+      },
+      "tokencache-save": {
+        "count": 1,
+        "totalMs": 7.4,
+        "avgMs": 7.4,
+        "maxMs": 7.4
+      }
+    }
+  },
+  "send-user-message": {
+    "wallMs": 662,
+    "freeze": {
+      "blockedMs": 538,
+      "blocks": 3,
+      "longestMs": 219
+    },
+    "spans": {
+      "chat-save": {
+        "count": 1,
+        "totalMs": 393,
+        "avgMs": 393,
+        "maxMs": 393
+      },
+      "itemized-save": {
+        "count": 1,
+        "totalMs": 330.8,
+        "avgMs": 330.8,
+        "maxMs": 330.8
+      },
+      "tokencache-save": {
+        "count": 1,
+        "totalMs": 49.3,
+        "avgMs": 49.3,
+        "maxMs": 49.3
+      }
+    }
+  },
+  "save-chat": {
+    "wallMs": 488,
+    "freeze": {
+      "blockedMs": 217,
+      "blocks": 1,
+      "longestMs": 217
+    },
+    "spans": {
+      "chat-save": {
+        "count": 1,
+        "totalMs": 386.2,
+        "avgMs": 386.2,
+        "maxMs": 386.2
+      },
+      "itemized-save": {
+        "count": 1,
+        "totalMs": 8,
+        "avgMs": 8,
+        "maxMs": 8
+      },
+      "tokencache-save": {
+        "count": 1,
+        "totalMs": 8.6,
+        "avgMs": 8.6,
+        "maxMs": 8.6
+      }
+    }
+  },
+  "save-chat-itemized-10": {
+    "wallMs": 517,
+    "freeze": {
+      "blockedMs": 214,
+      "blocks": 1,
+      "longestMs": 214
+    },
+    "spans": {
+      "chat-save": {
+        "count": 1,
+        "totalMs": 380.1,
+        "avgMs": 380.1,
+        "maxMs": 380.1
+      },
+      "itemized-save": {
+        "count": 1,
+        "totalMs": 50,
+        "avgMs": 50,
+        "maxMs": 50
+      },
+      "tokencache-save": {
+        "count": 1,
+        "totalMs": 9.1,
+        "avgMs": 9.1,
+        "maxMs": 9.1
+      }
+    }
+  },
+  "save-chat-itemized-40": {
+    "wallMs": 477,
+    "freeze": {
+      "blockedMs": 206,
+      "blocks": 1,
+      "longestMs": 206
+    },
+    "spans": {
+      "chat-save": {
+        "count": 1,
+        "totalMs": 372.6,
+        "avgMs": 372.6,
+        "maxMs": 372.6
+      },
+      "itemized-save": {
+        "count": 1,
+        "totalMs": 179,
+        "avgMs": 179,
+        "maxMs": 179
+      },
+      "tokencache-save": {
+        "count": 1,
+        "totalMs": 6.6,
+        "avgMs": 6.6,
+        "maxMs": 6.6
+      }
+    }
+  },
+  "streaming-run-4s": {
+    "wallMs": 4000,
+    "freeze": {
+      "blockedMs": 3572,
+      "blocks": 52,
+      "longestMs": 307
+    },
+    "spans": {
+      "chat-render": {
+        "count": 1,
+        "totalMs": 122.2,
+        "avgMs": 122.2,
+        "maxMs": 122.2
+      },
+      "stream-tick": {
+        "count": 51,
+        "totalMs": 328.5,
+        "avgMs": 6.44,
+        "maxMs": 9.9
+      }
+    },
+    "loaf": {
+      "frames": 50,
+      "totalMs": 3594,
+      "styleLayoutMs": 0,
+      "scriptMs": 758,
+      "worstMs": 317
+    }
+  },
+  "streaming-stop": {
+    "wallMs": 820,
+    "freeze": {
+      "blockedMs": 625,
+      "blocks": 4,
+      "longestMs": 281
+    },
+    "spans": {
+      "chat-save": {
+        "count": 1,
+        "totalMs": 368.2,
+        "avgMs": 368.2,
+        "maxMs": 368.2
+      },
+      "itemized-save": {
+        "count": 1,
+        "totalMs": 3.3,
+        "avgMs": 3.3,
+        "maxMs": 3.3
+      },
+      "tokencache-save": {
+        "count": 1,
+        "totalMs": 6.3,
+        "avgMs": 6.3,
+        "maxMs": 6.3
+      },
+      "stream-tick": {
+        "count": 2,
+        "totalMs": 16.4,
+        "avgMs": 8.2,
+        "maxMs": 8.2
+      }
+    },
+    "stream": {
+      "stopToInteractiveMs": 820,
+      "streamedLength": 3895,
+      "persistedLength": 3895
+    }
+  },
+  "streaming-run-4s-noscroll": {
+    "wallMs": 4000,
+    "freeze": {
+      "blockedMs": 3522,
+      "blocks": 53,
+      "longestMs": 285
+    },
+    "spans": {
+      "chat-render": {
+        "count": 1,
+        "totalMs": 98.9,
+        "avgMs": 98.9,
+        "maxMs": 98.9
+      },
+      "stream-tick": {
+        "count": 53,
+        "totalMs": 325.4,
+        "avgMs": 6.14,
+        "maxMs": 8.8
+      }
+    },
+    "loaf": {
+      "frames": 52,
+      "totalMs": 3620,
+      "styleLayoutMs": 0,
+      "scriptMs": 743,
+      "worstMs": 293
+    }
+  },
+  "streaming-stop-noscroll": {
+    "wallMs": 766,
+    "freeze": {
+      "blockedMs": 623,
+      "blocks": 4,
+      "longestMs": 277
+    },
+    "spans": {
+      "chat-save": {
+        "count": 1,
+        "totalMs": 380.2,
+        "avgMs": 380.2,
+        "maxMs": 380.2
+      },
+      "itemized-save": {
+        "count": 1,
+        "totalMs": 4.4,
+        "avgMs": 4.4,
+        "maxMs": 4.4
+      },
+      "tokencache-save": {
+        "count": 1,
+        "totalMs": 6.4,
+        "avgMs": 6.4,
+        "maxMs": 6.4
+      },
+      "stream-tick": {
+        "count": 1,
+        "totalMs": 7,
+        "avgMs": 7,
+        "maxMs": 7
+      }
+    },
+    "stream": {
+      "stopToInteractiveMs": 766,
+      "streamedLength": 3977,
+      "persistedLength": 3977
+    }
+  }
+}

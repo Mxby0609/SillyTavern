@@ -305,6 +305,22 @@ async function runStreamingScenario(page, { autoScroll = true } = {}) {
                 }
             };
 
+            // Attribute per-frame blocking: script vs style/layout (LoAF).
+            const loaf = { frames: 0, totalMs: 0, styleLayoutMs: 0, scriptMs: 0, worstMs: 0 };
+            globalThis.__loafState = loaf;
+            try {
+                globalThis.__loafObserver = new PerformanceObserver((list) => {
+                    for (const entry of list.getEntries()) {
+                        loaf.frames += 1;
+                        loaf.totalMs += entry.duration;
+                        loaf.styleLayoutMs += entry.styleAndLayoutDuration ?? 0;
+                        loaf.scriptMs += (entry.scripts ?? []).reduce((sum, script) => sum + script.duration, 0);
+                        if (entry.duration > loaf.worstMs) loaf.worstMs = entry.duration;
+                    }
+                });
+                globalThis.__loafObserver.observe({ type: 'long-animation-frame', buffered: false });
+            } catch { /* long-animation-frame unsupported: loaf stays zeroed */ }
+
             globalThis.__stopHarness = { base, processor, generatePromise: processor.generate() };
         });
 
@@ -313,6 +329,16 @@ async function runStreamingScenario(page, { autoScroll = true } = {}) {
         // setup render, ~100ms, noted here once).
         await page.waitForTimeout(4000);
         const run = await collectMeters(page, 4000);
+        run.loaf = await page.evaluate(() => {
+            globalThis.__loafObserver?.disconnect();
+            const loaf = globalThis.__loafState ?? null;
+            delete globalThis.__loafObserver;
+            delete globalThis.__loafState;
+            if (!loaf) {
+                return null;
+            }
+            return Object.fromEntries(Object.entries(loaf).map(([key, value]) => [key, Math.round(value)]));
+        });
 
         await resetMeters(page);
         const streamReport = await page.evaluate(async () => {
