@@ -288,6 +288,14 @@ test.describe('Streaming render', () => {
                         yield { text: finalText, swipes: [], logprobs: null, toolCalls: [], state: {} };
                         await new Promise(resolve => setTimeout(resolve, 5));
                     }
+                    // Tail burst with no timer gaps: the throttle cannot
+                    // render any of these, so the complete final text may
+                    // only survive through the unconditional per-yield
+                    // accumulation — the exact guarantee this test pins.
+                    for (let i = 31; i <= 36; i++) {
+                        finalText = Array.from({ length: i }, (_, n) => `word${n}`).join(' ');
+                        yield { text: finalText, swipes: [], logprobs: null, toolCalls: [], state: {} };
+                    }
                 };
 
                 await processor.generate();
