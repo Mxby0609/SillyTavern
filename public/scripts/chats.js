@@ -421,6 +421,7 @@ async function deleteMessageFile(messageBlock, messageId, fileIndex) {
 
     const url = message.extra.files[fileIndex]?.url;
     message.extra.files.splice(fileIndex, 1);
+    recordChatTouch(messageId);
 
     await saveChatConditional();
     await deleteFileFromServer(url);
@@ -497,6 +498,7 @@ function embedMessageFile(messageId, messageBlock) {
         await populateFileAttachment(message, 'embed_file_input');
         await eventSource.emit(event_types.MESSAGE_FILE_EMBEDDED, messageId);
         appendMediaToMessage(message, messageBlock, SCROLL_BEHAVIOR.KEEP);
+        recordChatTouch(messageId);
         await saveChatConditional();
     }
 }

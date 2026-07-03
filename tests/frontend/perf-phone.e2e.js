@@ -64,6 +64,19 @@ test.describe('Phone-emulation performance', () => {
         // Keep fixture files byte-identical: serialization+gzip still run,
         // only the server-side write is skipped (it never blocks the UI).
         await page.route('**/api/chats/save', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"result":"ok"}' }));
+        await page.route('**/api/chats/save-raw*', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' }));
+        // The delta ack must carry plausible integers or the ledger poisons
+        // itself and every measured save degrades to a full save.
+        await page.route('**/api/chats/save-delta', async (route) => {
+            const body = route.request().postDataJSON();
+            const appended = (body?.ops ?? []).filter(op => op.op === 'append').flatMap(op => op.lines).length;
+            const bytes = (body?.ops ?? []).reduce((sum, op) => sum + (op.lines ?? [op.line ?? '']).join('').length, 0);
+            await route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ ok: true, lineCount: (body?.base?.lineCount ?? 1) + appended, fileSize: (body?.base?.fileSize ?? 0) + bytes }),
+            });
+        });
 
         await page.evaluate(() => localStorage.setItem('perfTrace', '1'));
         await page.reload();

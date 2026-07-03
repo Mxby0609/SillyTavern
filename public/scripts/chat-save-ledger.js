@@ -32,8 +32,10 @@ let armed = false;
 let unsupported = false;
 /** @type {{chatKey: string, lineCount: number, fileSize: number, integrity: string|null, headerLine: string}|null} */
 let base = null;
-/** @type {Set<number>} */
-let appendedIndexes = new Set();
+/** Arm generation — lets the build tell pre-arm leftovers apart from post-arm records. */
+let armEpoch = 0;
+/** @type {Map<number, number>} index -> armEpoch at record time */
+let appendedIndexes = new Map();
 /** @type {Set<number>} */
 let touchedIndexes = new Set();
 let deltasSinceFullSave = 0;
@@ -91,7 +93,7 @@ function guardTrackedEntryCap() {
  */
 export function recordChatAppend(index) {
     if (!armed) return;
-    appendedIndexes.add(index);
+    appendedIndexes.set(index, armEpoch);
     guardTrackedEntryCap();
 }
 
@@ -134,6 +136,7 @@ export function armChatSaveLedger({ chatKey, lineCount, fileSize, headerLine }) 
         return;
     }
     armed = true;
+    armEpoch += 1;
     base = { chatKey, lineCount, fileSize, integrity: parseIntegrity(headerLine), headerLine };
     // Deliberately does NOT clear the recorded sets: entries may have been
     // recorded during the full save's awaits (their content is then not in
@@ -196,6 +199,19 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
     const baseMessageCount = base.lineCount - 1;
     const appendCount = chatLength - baseMessageCount;
     if (appendCount < 0) return null;
+    // An append below the base line count is either a PRE-ARM leftover —
+    // provably inside the arming full save's snapshot (mid-save appends
+    // always land at >= baseMessageCount, since pushes extend the array
+    // past the snapshot length), downgradable to a byte-identical touch —
+    // or a POST-ARM record whose index only sank because an UNRECORDED
+    // shrink happened: fail closed immediately.
+    for (const [index, epoch] of [...appendedIndexes]) {
+        if (index < baseMessageCount) {
+            if (epoch >= armEpoch) return null;
+            appendedIndexes.delete(index);
+            touchedIndexes.add(index);
+        }
+    }
     if (appendedIndexes.size !== appendCount) return null;
     for (let index = baseMessageCount; index < chatLength; index++) {
         if (!appendedIndexes.has(index)) return null;
@@ -229,7 +245,7 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
     // The consumed entries are swapped out so mutations landing while the
     // request is in flight accumulate separately (and survive the ack). On
     // failure the whole ledger is poisoned, so nothing needs restoring.
-    appendedIndexes = new Set();
+    appendedIndexes = new Map();
     touchedIndexes = new Set();
 
     return {

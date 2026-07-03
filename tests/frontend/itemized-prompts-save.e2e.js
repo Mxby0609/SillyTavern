@@ -13,7 +13,7 @@ import { testSetup } from './frontent-test-utils.js';
 test.describe('Itemized prompts dirty flag', () => {
     test.beforeEach(async ({ page }) => {
         await testSetup.awaitST({ page });
-        for (const url of ['**/api/chats/save', '**/api/settings/save']) {
+        for (const url of ['**/api/chats/save', '**/api/chats/save-raw*', '**/api/chats/save-delta', '**/api/settings/save']) {
             await page.route(url, route => route.fulfill({ status: 200, contentType: 'application/json', body: '{"result":"ok"}' }));
         }
     });

@@ -99,7 +99,7 @@ import { t } from './i18n.js';
 import { kai_settings } from './kai-settings.js';
 import { instruct_presets, selectContextPreset, selectInstructPreset } from './instruct-mode.js';
 import { debounce_timeout, SWIPE_DIRECTION, SWIPE_SOURCE } from './constants.js';
-import { poisonChatSaveLedger, recordChatAppend } from './chat-save-ledger.js';
+import { poisonChatSaveLedger, recordChatAppend, recordChatTouch } from './chat-save-ledger.js';
 export {
     executeSlashCommands, executeSlashCommandsWithOptions, getSlashCommandsHelp, registerSlashCommand,
 };
@@ -4647,6 +4647,7 @@ async function addSwipeCallback(args, value) {
         lastMessage.swipe_info = lastMessage.swipes.map(() => ({}));
     }
 
+    recordChatTouch(chat.length - 1);
     lastMessage.swipes.push(value);
     lastMessage.swipe_info.push({
         send_date: getMessageTimeStamp(),
