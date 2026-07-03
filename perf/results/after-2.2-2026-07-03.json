@@ -1,0 +1,79 @@
+{
+  "open-chat": {
+    "chat-render": {
+      "count": 1,
+      "totalMs": 51.9,
+      "avgMs": 51.9,
+      "maxMs": 51.9
+    }
+  },
+  "switch-source-to-claude": {},
+  "switch-source-to-openai": {},
+  "model-change": {},
+  "drawer-open-after-config-change": {
+    "pm-dryrun": {
+      "count": 1,
+      "totalMs": 957.2,
+      "avgMs": 957.2,
+      "maxMs": 957.2
+    },
+    "gen-preflight": {
+      "count": 1,
+      "totalMs": 955.4,
+      "avgMs": 955.4,
+      "maxMs": 955.4
+    },
+    "wi-scan": {
+      "count": 1,
+      "totalMs": 434.4,
+      "avgMs": 434.4,
+      "maxMs": 434.4
+    },
+    "oai-populate": {
+      "count": 1,
+      "totalMs": 511.4,
+      "avgMs": 511.4,
+      "maxMs": 511.4
+    },
+    "pm-render": {
+      "count": 1,
+      "totalMs": 14.6,
+      "avgMs": 14.6,
+      "maxMs": 14.6
+    }
+  },
+  "assemble-prompt": {
+    "gen-preflight": {
+      "count": 1,
+      "totalMs": 112.2,
+      "avgMs": 112.2,
+      "maxMs": 112.2
+    },
+    "wi-scan": {
+      "count": 1,
+      "totalMs": 59,
+      "avgMs": 59,
+      "maxMs": 59
+    },
+    "oai-populate": {
+      "count": 1,
+      "totalMs": 48.2,
+      "avgMs": 48.2,
+      "maxMs": 48.2
+    }
+  },
+  "save-chat": {
+    "chat-save": {
+      "count": 1,
+      "totalMs": 23.1,
+      "avgMs": 23.1,
+      "maxMs": 23.1
+    },
+    "tokencache-save": {
+      "count": 1,
+      "totalMs": 1.1,
+      "avgMs": 1.1,
+      "maxMs": 1.1
+    }
+  }
+}
