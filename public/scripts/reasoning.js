@@ -531,6 +531,9 @@ export class ReasoningHandler {
             await eventSource.emit(event_types.STREAM_REASONING_DONE, this.reasoning, this.getDuration(), messageId, this.state);
         }
 
+        // The final render always formats fresh: intermediate ticks may have
+        // been served from the display memo while format inputs changed.
+        this.#displayMemo = null;
         this.updateDom(messageId);
     }
 

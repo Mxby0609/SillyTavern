@@ -3606,9 +3606,12 @@ export class StreamingProcessor {
             for (let i = 0; i < this.swipes.length; i++) {
                 // A swipe whose text did not change since it was last cleaned
                 // keeps its previous result instead of re-running the cleanup
-                // (user regex + stopping strings) over it on every tick.
+                // (user regex + stopping strings) over it on every tick. The
+                // final tick always cleans fresh: its result is persisted into
+                // the message, so it must reflect the current state of any
+                // macros the cleanup depends on.
                 const memo = this.swipeCleanupMemos[i];
-                if (memo && memo.input === this.swipes[i]) {
+                if (!isFinal && memo && memo.input === this.swipes[i]) {
                     this.swipes[i] = memo.output;
                     continue;
                 }

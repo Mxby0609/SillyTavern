@@ -55,7 +55,7 @@ test.describe('Streaming render', () => {
     test('frozen reasoning is not re-rendered, changed reasoning is', async ({ page }) => {
         const results = await page.evaluate(async () => {
             const { chat, redisplayChat, messageFormatting } = await import('/script.js');
-            const { ReasoningHandler } = await import('/scripts/reasoning.js');
+            const { ReasoningHandler, ReasoningState } = await import('/scripts/reasoning.js');
 
             const base = chat.length;
             chat.push({
@@ -89,7 +89,14 @@ test.describe('Streaming render', () => {
                 const secondRender = contentDom.innerHTML;
                 const expectedSecond = messageFormatting('thinking about *stars* and planets and moons', '', false, false, base, {}, true);
 
-                return { firstRender, markSurvivesRepeat, markGoneAfterChange, secondRender, expectedSecond };
+                // The finish boundary always renders fresh, even when the
+                // reasoning text did not change since the last tick.
+                contentDom.firstElementChild.setAttribute('data-probe', '2');
+                handler.state = ReasoningState.Done;
+                await handler.finish(base);
+                const markGoneAfterFinish = !contentDom.querySelector('[data-probe]');
+
+                return { firstRender, markSurvivesRepeat, markGoneAfterChange, secondRender, expectedSecond, markGoneAfterFinish };
             } finally {
                 chat.splice(base);
                 await redisplayChat({ startIndex: 0, fade: false });
@@ -100,6 +107,7 @@ test.describe('Streaming render', () => {
         expect(results.markSurvivesRepeat, 'unchanged reasoning keeps its DOM nodes').toBe(true);
         expect(results.markGoneAfterChange, 'changed reasoning re-renders').toBe(true);
         expect(results.secondRender, 'the re-render equals a fresh format of the new text').toBe(results.expectedSecond);
+        expect(results.markGoneAfterFinish, 'finish always renders fresh').toBe(true);
     });
 
     test('swipe cleanup reuses results only while the swipe text is unchanged', async ({ page }) => {
@@ -167,11 +175,17 @@ test.describe('Streaming render', () => {
                 await context.executeSlashCommandsWithOptions(`/setvar key=${varKey} gamma`);
                 await tick('stream body four');
 
+                // The FINAL tick persists its result into the message, so it
+                // must bypass the memo and re-bake the current variable even
+                // though the swipe text is unchanged.
+                await processor.onProgressStreaming(base, 'stream body final', true);
+                const finalSwipe = processor.swipes[0];
+
                 // A fresh swipe value from the stream must always be cleaned.
                 processor.swipes = ['SRPROBE_fresh'];
                 await tick('stream body five');
 
-                return { ticks };
+                return { ticks, finalSwipe };
             } finally {
                 const scriptIndex = extension_settings.regex.indexOf(script);
                 if (scriptIndex !== -1) {
@@ -187,6 +201,7 @@ test.describe('Streaming render', () => {
         expect(results.ticks[1], 'changed swipe text is re-cleaned with the new variable').toBe('SRPROBE_beta');
         expect(results.ticks[2], 'stable text keeps its value').toBe('SRPROBE_beta');
         expect(results.ticks[3], 'unchanged text is served from the memo').toBe('SRPROBE_beta');
+        expect(results.finalSwipe, 'the final tick bypasses the memo before persisting').toBe('SRPROBE_gamma');
         expect(results.ticks[4], 'fresh stream data is always cleaned').toBe('SRPROBE_gamma');
     });
 });
