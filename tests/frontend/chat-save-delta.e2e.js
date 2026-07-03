@@ -491,13 +491,16 @@ test.describe('Incremental chat saves', () => {
                 poisonChatSaveLedger('race-test-concurrent');
                 const inFlight = saveChatConditional();
                 await new Promise(resolve => setTimeout(resolve, 250));
-                // Unhide message 0 (hidden by the first half) mid-flight
-                // FIRST, then fire the concurrent alternate-key copy save —
-                // a global flag cleared by the copy's snapshot would launder
-                // the touch; the token design must not.
-                await hideChatMessageRange(0, 0, true);
+                // Unhide message 0 (hidden by the first half) mid-flight —
+                // WITHOUT awaiting (its own queued save would block until
+                // the in-flight save finishes). Its touch lands
+                // synchronously; the concurrent copy save's snapshot then
+                // falls INSIDE the victim save's touch->arm window: a
+                // global flag cleared there would launder the touch; the
+                // token design must not.
+                const hidePromise = hideChatMessageRange(0, 0, true);
                 const copySave = saveChat({ chatName: 'e2e-race-copy' });
-                await Promise.all([inFlight, copySave]);
+                await Promise.all([inFlight, hidePromise, copySave]);
             });
             await page.unroute('**/api/chats/save-raw*');
 
