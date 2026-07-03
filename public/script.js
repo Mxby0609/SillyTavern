@@ -9252,13 +9252,11 @@ export function refreshSwipeButtons(updateCounters = false, fade = true) {
     //Non-messages can appear in chat. '.mes' is required.
     const messageElements = chatElement.children('.mes[mesid]');
 
-    const firstDisplayedMesId = Number(messageElements.first().attr('mesid'));
-
     //Group each message.
     messageElements.each((index, div) => {
-        //This assumes the messages are in order and their Id's are accurate.
-        const messageId = firstDisplayedMesId + index;
-        //Number($(div).attr('mesid')); Would not misscount due to a missing div, but is much slower.
+        //Each element's own id stays correct even if an element is missing;
+        //a native attribute read is cheap enough to not need position math.
+        const messageId = Number(div.getAttribute('mesid'));
 
         const message = chat[messageId];
 
@@ -9456,20 +9454,31 @@ export async function importCharacterChat(formData, { refresh = true } = {}) {
 export function updateViewMessageIds(startIndex = null) {
     const minId = startIndex ?? getFirstDisplayedMessageId();
 
-    chatElement.find('.mes').each(function (index, element) {
-        $(element).attr('mesid', minId + index);
-        $(element).find('.mesIDDisplay').text(`#${minId + index}`);
+    //Renumbering is positional by contract: displayed messages form one
+    //contiguous range, and after a chat mutation this reassigns their ids.
+    const messageElements = chatElement.find('.mes');
+    const lastIndex = messageElements.length - 1;
+    messageElements.each(function (index, element) {
+        element.setAttribute('mesid', String(minId + index));
+        for (const display of element.querySelectorAll('.mesIDDisplay')) {
+            display.textContent = `#${minId + index}`;
+        }
+        element.classList.toggle('last_mes', index === lastIndex);
     });
-
-    chatElement.find('.mes').removeClass('last_mes');
-    chatElement.find('.mes').last().addClass('last_mes');
 
     updateEditArrowClasses();
 }
 
 export function getFirstDisplayedMessageId() {
-    const allIds = Array.from(document.querySelectorAll('#chat .mes')).map(el => Number(el.getAttribute('mesid'))).filter(x => !isNaN(x));
-    const minId = Math.min(...allIds);
+    //A plain loop: spreading thousands of ids into Math.min can overflow the
+    //argument limit when the whole chat is displayed.
+    let minId = Infinity;
+    for (const element of document.querySelectorAll('#chat .mes')) {
+        const id = Number(element.getAttribute('mesid'));
+        if (!isNaN(id) && id < minId) {
+            minId = id;
+        }
+    }
     return minId;
 }
 
@@ -10164,12 +10173,10 @@ export async function swipe(event, direction, { source, repeated, message = chat
         const MAXIMUM_ANIMATED = 100;
 
         const messages = chatElement.children('.mes');
-        const firstDisplayedMesId = Number(messages.first().attr('mesid'));
 
         const swipedMessagesDiv = messages.filter((index, div) => {
-            // const messageId = Number($(div).attr('mesid')); //Slower.
-            //This assumes the messages are in order and their Id's are accurate.
-            const divMessageId = firstDisplayedMesId + index;
+            //Each element's own id stays correct even if an element is missing.
+            const divMessageId = Number(div.getAttribute('mesid'));
 
             return (divMessageId < mesId + MAXIMUM_ANIMATED && divMessageId >= mesId);
         });
