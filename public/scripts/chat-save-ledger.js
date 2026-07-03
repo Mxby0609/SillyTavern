@@ -36,8 +36,8 @@ let base = null;
 let armEpoch = 0;
 /** @type {Map<number, number>} index -> armEpoch at record time */
 let appendedIndexes = new Map();
-/** @type {Set<number>} */
-let touchedIndexes = new Set();
+/** @type {Map<number, number>} index -> armEpoch at record time */
+let touchedIndexes = new Map();
 let deltasSinceFullSave = 0;
 let bytesSinceFullSave = 0;
 let reconcileDue = false;
@@ -104,7 +104,7 @@ export function recordChatAppend(index) {
  */
 export function recordChatTouch(index) {
     if (!armed) return;
-    touchedIndexes.add(index);
+    touchedIndexes.set(index, armEpoch);
     guardTrackedEntryCap();
 }
 
@@ -197,6 +197,10 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
     if (reconcileDue || deltasSinceFullSave >= RECONCILE_AFTER_DELTAS || bytesSinceFullSave >= RECONCILE_AFTER_BYTES) return null;
 
     const baseMessageCount = base.lineCount - 1;
+    // The chat can never shrink below the acknowledged base through
+    // recorded ops (only appends and in-place touches exist) — a shorter
+    // chat means an unrecorded delete: fail closed.
+    if (chatLength < baseMessageCount) return null;
     const appendCount = chatLength - baseMessageCount;
     // An append below the base line count is either a PRE-ARM leftover —
     // provably inside the arming full save's snapshot (mid-save appends
@@ -205,24 +209,35 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
     // or a POST-ARM record whose index only sank because an UNRECORDED
     // shrink happened: fail closed immediately.
     for (const [index, epoch] of [...appendedIndexes]) {
+        if (!Number.isInteger(index) || index < 0) return null;
         if (index < baseMessageCount) {
             if (epoch >= armEpoch) return null;
             appendedIndexes.delete(index);
-            touchedIndexes.add(index);
+            touchedIndexes.set(index, epoch);
+        } else if (index >= chatLength) {
+            // Beyond the current end: pre-arm leftovers of messages that no
+            // longer exist are droppable; a post-arm record out here means
+            // an unrecorded shrink.
+            if (epoch >= armEpoch) return null;
+            appendedIndexes.delete(index);
         }
     }
-    // Also rejects any unrecorded shrink: a negative appendCount can never
-    // equal the (non-negative) recorded size.
-    if (appendedIndexes.size !== appendCount) return null;
-    for (let index = baseMessageCount; index < chatLength; index++) {
-        if (!appendedIndexes.has(index)) return null;
-    }
-    for (const index of touchedIndexes) {
-        if (!Number.isInteger(index) || index < 0 || index >= chatLength) return null;
+    // No per-position record check is needed for the tail: the append ops
+    // below serialize EVERY position in [baseMessageCount, chatLength)
+    // fresh from chat[], so an unrecorded push inside the appended window
+    // still reaches the disk correctly. The records exist for the epoch
+    // logic above — proving no unrecorded SHRINK repositioned the tail.
+    // Same pre-arm/post-arm split for touches that point past the end.
+    for (const [index, epoch] of [...touchedIndexes]) {
+        if (!Number.isInteger(index) || index < 0) return null;
+        if (index >= chatLength) {
+            if (epoch >= armEpoch) return null;
+            touchedIndexes.delete(index);
+        }
     }
 
     const headerChanged = headerLine !== base.headerLine;
-    const replaceIndexes = [...touchedIndexes].filter(index => index < baseMessageCount).sort((a, b) => a - b);
+    const replaceIndexes = [...touchedIndexes.keys()].filter(index => index < baseMessageCount).sort((a, b) => a - b);
 
     if (!headerChanged && replaceIndexes.length === 0 && appendCount === 0) {
         return { noop: true };
@@ -247,7 +262,7 @@ export function buildChatDeltaRequest({ chatKey, chatLength, headerLine, seriali
     // request is in flight accumulate separately (and survive the ack). On
     // failure the whole ledger is poisoned, so nothing needs restoring.
     appendedIndexes = new Map();
-    touchedIndexes = new Set();
+    touchedIndexes = new Map();
 
     return {
         base: { lineCount: base.lineCount, fileSize: base.fileSize, integrity: base.integrity },

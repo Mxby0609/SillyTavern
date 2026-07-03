@@ -217,8 +217,8 @@ test.describe('Incremental chat saves', () => {
             expect(traffic.filter(t => t.kind === 'delta').length, 'no delta after an unrecorded splice').toBe(0);
             expect(traffic.filter(t => t.kind === 'raw').length >= 1, 'the silent splice was caught by the length invariant').toBe(true);
 
-            // A pure unrecorded shrink (no append masking it): the length
-            // invariant alone must force the full save.
+            // A pure unrecorded shrink (no append masking it): the shrink
+            // guard alone must force the full save.
             traffic.length = 0;
             await page.evaluate(async () => {
                 const { chat, saveChat } = await import('/script.js');
@@ -227,6 +227,20 @@ test.describe('Incremental chat saves', () => {
             });
             expect(traffic.filter(t => t.kind === 'delta').length, 'no delta for a pure shrink').toBe(0);
             expect(traffic.filter(t => t.kind === 'raw').length, 'the shrink full-saved').toBe(1);
+
+            // Silent GROWTH: an unrecorded push inside the appended window.
+            // Whether the save rides a delta (positions are serialized
+            // fresh) or falls back to a full save, the OUTCOME must be a
+            // disk file that mirrors memory including the silent push.
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const { chat, sendMessageAsUser } = await import('/script.js');
+                chat.push({ name: 'Ghost', is_user: false, mes: 'silently pushed', extra: {} });
+                await sendMessageAsUser('append after silent push');
+            });
+            const growthChat = await fetchServerChat(page, info);
+            expect(growthChat.some(line => line.mes === 'silently pushed'), 'the unrecorded push reached the disk').toBe(true);
+            expect(growthChat[growthChat.length - 1].mes, 'the recorded send is the last line').toBe('append after silent push');
 
             const serverChat = await fetchServerChat(page, info);
             const clientLength = await page.evaluate(async () => (await import('/script.js')).chat.length);
