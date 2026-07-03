@@ -1036,6 +1036,7 @@ async function deleteMessageMedia(messageId, mediaIndex, messageBlock) {
 
     deleteUrls.push(message.extra.media[mediaIndex].url);
     message.extra.media.splice(mediaIndex, 1);
+    recordChatTouch(messageId);
 
     if (message.extra.media_index === mediaIndex) {
         const newIndex = mediaIndex > 0 ? mediaIndex - 1 : 0;
@@ -1088,6 +1089,7 @@ async function switchMessageMediaDisplay(messageId, messageBlock, targetDisplay)
     }
 
     message.extra.media_display = targetDisplay;
+    recordChatTouch(messageId);
     await saveChatConditional();
     appendMediaToMessage(message, messageBlock, SCROLL_BEHAVIOR.KEEP);
 }
@@ -2106,6 +2108,7 @@ async function onImageSwiped(messageId, element, direction) {
         message.extra.media_index = newIndex >= media.length ? 0 : newIndex;
     }
 
+    recordChatTouch(chat.indexOf(message));
     await saveChatConditional();
     appendMediaToMessage(message, element);
 }

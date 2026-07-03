@@ -7592,7 +7592,7 @@ async function sendChatSaveDelta(plan, fileName, avatarUrl) {
             lineCount: result?.lineCount,
             fileSize: result?.fileSize,
             headerLine: plan.headerLine,
-            requestBytes: body.length,
+            requestBytes: new TextEncoder().encode(body).byteLength,
         });
         return true;
     } catch (error) {

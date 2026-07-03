@@ -3,6 +3,7 @@ import {
 } from '../lib.js';
 import { chat, closeMessageEditor, event_types, eventSource, main_api, messageFormatting, saveChatConditional, saveChatDebounced, saveSettingsDebounced, substituteParams, syncMesToSwipe, updateMessageBlock } from '../script.js';
 import { getRegexedString, regex_placement } from './extensions/regex/engine.js';
+import { recordChatTouch } from './chat-save-ledger.js';
 import { getCurrentLocale, t, translate } from './i18n.js';
 import { macros, MacroCategory } from './macros/macro-system.js';
 import { chat_completion_sources, getChatCompletionModel, oai_settings } from './openai.js';
@@ -940,6 +941,7 @@ function registerReasoningSlashCommands() {
 
             message.extra.reasoning = String(value ?? '');
             message.extra.reasoning_type = ReasoningType.Manual;
+            recordChatTouch(chat.indexOf(message));
             await saveChatConditional();
 
             closeMessageEditor('reasoning');
@@ -1295,6 +1297,7 @@ function setReasoningEventHandlers() {
             return;
         }
         updateReasoningFromValue(message, newReasoning);
+        recordChatTouch(chat.indexOf(message));
         await saveChatConditional();
         updateMessageBlock(messageId, message);
 
@@ -1357,6 +1360,7 @@ function setReasoningEventHandlers() {
         message.extra.reasoning = '';
         delete message.extra.reasoning_type;
         delete message.extra.reasoning_duration;
+        recordChatTouch(chat.indexOf(message));
         await saveChatConditional();
         updateMessageBlock(messageId, message);
         const textarea = messageBlock.find('.reasoning_edit_textarea');
@@ -1388,6 +1392,7 @@ function setReasoningEventHandlers() {
 
         updateReasoningFromValue(message, String($(this).val()));
         updateReasoningUI(messageBlock);
+        recordChatTouch(chat.indexOf(message));
         saveChatDebounced();
     });
 }
@@ -1574,6 +1579,7 @@ function registerReasoningAppEvents() {
 
         if (contentUpdated) {
             syncMesToSwipe();
+            recordChatTouch(chat.indexOf(message));
             saveChatDebounced();
 
             // Find if a message already exists in DOM and must be updated

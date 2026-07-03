@@ -149,9 +149,13 @@ test.describe('Phone-emulation performance', () => {
 
         // Arm the delta ledger with one un-metered full save, so every hot
         // scenario below measures its real (delta) save path instead of one
-        // of them absorbing the arming full save.
+        // of them absorbing the arming full save. (Direct import — the
+        // context.saveChat wrapper poisons by design.)
         await page.evaluate(async () => {
-            await globalThis.SillyTavern.getContext().saveChat();
+            const { saveChat } = await import('/script.js');
+            const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
+            poisonChatSaveLedger('perf-arming');
+            await saveChat();
         });
         await page.waitForTimeout(SETTLE_MS);
 
@@ -182,9 +186,10 @@ test.describe('Phone-emulation performance', () => {
         // the number comparable with earlier rounds' save-chat. ---
         await resetMeters(page);
         wallMs = await timeEvaluate(page, async () => {
+            const { saveChat } = await import('/script.js');
             const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
             poisonChatSaveLedger('perf-full-save-scenario');
-            await globalThis.SillyTavern.getContext().saveChat();
+            await saveChat();
         });
         await waitForMeasure(page, 'tokencache-save', MEASURE_TIMEOUT_MS);
         results['save-chat'] = await collectMeters(page, wallMs);
@@ -194,10 +199,10 @@ test.describe('Phone-emulation performance', () => {
         // the ledger. ---
         await resetMeters(page);
         wallMs = await timeEvaluate(page, async () => {
-            const { chat } = await import('/script.js');
+            const { chat, saveChat } = await import('/script.js');
             const { recordChatTouch } = await import('/scripts/chat-save-ledger.js');
             recordChatTouch(chat.length - 1);
-            await globalThis.SillyTavern.getContext().saveChat();
+            await saveChat();
         });
         await waitForMeasure(page, 'tokencache-save', MEASURE_TIMEOUT_MS);
         results['save-chat-delta'] = await collectMeters(page, wallMs);

@@ -14,9 +14,11 @@
  *   mutation (middle insert/delete/move), a failed delta, an entry-count
  *   blowup, a chat switch — poisons it, and every save is a FULL save until
  *   the next successful full save re-arms it.
- * - At build time the implied length must match chat.length exactly and the
- *   appended indexes must form a contiguous tail; any mismatch (e.g. an
- *   extension spliced chat[] directly) falls back to a full save.
+ * - At build time the chat must not have shrunk below the acknowledged
+ *   base, and recorded indexes that sank below it (or past the end) in the
+ *   CURRENT arm epoch mean an unrecorded delete happened: full save.
+ *   Appended tail content is serialized positionally fresh from chat[],
+ *   so no per-position record check is needed for correctness.
  * - Same-length in-place mutations from unknown writers are the one class
  *   the ledger cannot see; their exposure is bounded by reconciliation:
  *   a forced full save every RECONCILE_AFTER_DELTAS deltas /

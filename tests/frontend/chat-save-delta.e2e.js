@@ -250,6 +250,43 @@ test.describe('Incremental chat saves', () => {
         }
     });
 
+    test('same-length in-place mutations persist: wired touches ride deltas, extension saves fail closed', async ({ page }) => {
+        const info = await openThrowawayChat(page);
+        const { traffic } = info;
+        try {
+            await sendUserMessage(page, 'base one');
+            await sendUserMessage(page, 'base two');
+
+            // Wired core path: /hide flips is_system in place (same length,
+            // same header) — exactly the shape the noop path would swallow
+            // without its recordChatTouch.
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const context = globalThis.SillyTavern.getContext();
+                await context.executeSlashCommandsWithOptions('/hide 0');
+            });
+            expect(traffic.length > 0, 'the hide save was not treated as a noop').toBe(true);
+            let serverChat = await fetchServerChat(page, info);
+            expect(serverChat[1].is_system, 'the hidden flag reached the disk').toBe(true);
+
+            // Extension-style: direct in-place mutation + context.saveChat.
+            // The context wrapper poisons, forcing a FULL save that carries
+            // the unrecorded change.
+            traffic.length = 0;
+            await page.evaluate(async () => {
+                const { chat } = await import('/script.js');
+                chat[0].extra = { ...(chat[0].extra ?? {}), probe: 'extension-write' };
+                await globalThis.SillyTavern.getContext().saveChat();
+            });
+            expect(traffic.filter(t => t.kind === 'delta').length, 'no delta for an extension-origin save').toBe(0);
+            expect(traffic.filter(t => t.kind === 'raw').length, 'the extension save full-saved').toBe(1);
+            serverChat = await fetchServerChat(page, info);
+            expect(serverChat[1].extra?.probe, 'the extension write reached the disk').toBe('extension-write');
+        } finally {
+            await deleteThrowawayChat(page, info);
+        }
+    });
+
     test('a foreign write 409s the delta and the client recovers transparently', async ({ page }) => {
         const info = await openThrowawayChat(page);
         const { traffic } = info;
