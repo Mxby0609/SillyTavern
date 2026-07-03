@@ -1604,6 +1604,7 @@ export async function clearChat({ clearData = false } = {}) {
     await saveItemizedPrompts(getCurrentChatId());
     itemizedPrompts.length = 0;
 
+    poisonChatSaveLedger('chat-cleared');
     if (clearData) chat.length = 0;
 }
 
@@ -8505,6 +8506,8 @@ async function messageEditMove(sourceId, targetId) {
     targetMessageDiv.attr('mesid', sourceId);
     sourceMessageDiv.attr('mesid', targetId);
 
+    // Reorders cannot be represented by delta ops.
+    poisonChatSaveLedger('message-move');
     // Swap chat array entries.
     [chat[sourceId], chat[targetId]] = [chat[targetId], chat[sourceId]];
 
@@ -11150,6 +11153,8 @@ function addDebugFunctions() {
             message.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
         }
 
+        // Bulk in-place rewrite across the whole chat: full save.
+        poisonChatSaveLedger('token-count-backfill');
         await saveChatConditional();
         await reloadCurrentChat();
     };

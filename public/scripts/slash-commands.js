@@ -5857,6 +5857,7 @@ async function messageRoleCallback(args, role) {
         existingMessage.remove();
     }
     await eventSource.emit(event_types.MESSAGE_UPDATED, modifyAt);
+    recordChatTouch(modifyAt);
     await saveChatConditional();
 
     return role;
@@ -5923,6 +5924,7 @@ async function messageNameCallback(args, name) {
         existingMessage.remove();
     }
     await eventSource.emit(event_types.MESSAGE_UPDATED, modifyAt);
+    recordChatTouch(modifyAt);
     await saveChatConditional();
 
     return newName;
@@ -6057,6 +6059,7 @@ export async function sendNarratorMessage(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
+        poisonChatSaveLedger('slash-message-insert');
         chat.splice(insertAt, 0, message);
         await saveChatConditional();
         await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
@@ -6064,6 +6067,7 @@ export async function sendNarratorMessage(args, text) {
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
         chat.push(message);
+        recordChatAppend(chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, (chat.length - 1));
         addOneMessage(message);
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, (chat.length - 1));
@@ -6143,6 +6147,7 @@ async function sendCommentMessage(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
+        poisonChatSaveLedger('slash-message-insert');
         chat.splice(insertAt, 0, message);
         await saveChatConditional();
         await eventSource.emit(event_types.MESSAGE_SENT, insertAt);
@@ -6150,6 +6155,7 @@ async function sendCommentMessage(args, text) {
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
         chat.push(message);
+        recordChatAppend(chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, (chat.length - 1));
         addOneMessage(message);
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, (chat.length - 1));
