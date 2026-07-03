@@ -25,6 +25,14 @@ export function setRequestCompressionConfig(config) {
 }
 
 /**
+ * Returns a snapshot of the current request compression configuration.
+ * @returns {RequestCompressionConfig} Copy of the current configuration
+ */
+export function getRequestCompressionConfig() {
+    return { ...requestCompressionConfig };
+}
+
+/**
  * Compresses a Uint8Array using gzip.
  * @param {Uint8Array<ArrayBuffer>} input Uint8Array to compress
  * @returns {{ promise: Promise<Uint8Array<ArrayBuffer>>, terminate: () => void }} Gzip-compressed Uint8Array promise and a terminate function.

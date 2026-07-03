@@ -286,6 +286,7 @@ import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
 import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
+import { serializeChatSaveOffThread } from './scripts/chat-save-serializer.js';
 import { perfMark, perfMeasure, perfAccum, perfNow } from './scripts/perf-metrics.js';
 import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
@@ -7439,18 +7440,33 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
 
     try {
         perfMark('chat-save:start');
-        const saveChatRequest = await compressRequest({
-            method: 'POST',
-            cache: 'no-cache',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                ch_name: characters[this_chid].name,
-                file_name: fileName,
-                chat: [chatHeader, ...trimmedChat],
-                avatar_url: characters[this_chid].avatar,
-                force: force,
-            }),
-        });
+        const payload = {
+            ch_name: characters[this_chid].name,
+            file_name: fileName,
+            chat: [chatHeader, ...trimmedChat],
+            avatar_url: characters[this_chid].avatar,
+            force: force,
+        };
+
+        // Serialization + compression happen in a worker so a multi-MB
+        // chat does not freeze the UI on every save; on any worker
+        // failure the inline path below produces the identical request.
+        let saveChatRequest;
+        const offThread = await serializeChatSaveOffThread(payload);
+        if (offThread) {
+            const headers = new Headers(getRequestHeaders());
+            if (offThread.gzip) {
+                headers.set('Content-Encoding', 'gzip');
+            }
+            saveChatRequest = { method: 'POST', cache: 'no-cache', headers, body: offThread.body };
+        } else {
+            saveChatRequest = await compressRequest({
+                method: 'POST',
+                cache: 'no-cache',
+                headers: getRequestHeaders(),
+                body: JSON.stringify(payload),
+            });
+        }
         const result = await fetch('/api/chats/save', saveChatRequest);
         perfMeasure('chat-save', 'chat-save:start');
 
