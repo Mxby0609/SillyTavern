@@ -99,6 +99,7 @@ import { t } from './i18n.js';
 import { kai_settings } from './kai-settings.js';
 import { instruct_presets, selectContextPreset, selectInstructPreset } from './instruct-mode.js';
 import { debounce_timeout, SWIPE_DIRECTION, SWIPE_SOURCE } from './constants.js';
+import { poisonChatSaveLedger, recordChatAppend } from './chat-save-ledger.js';
 export {
     executeSlashCommands, executeSlashCommandsWithOptions, getSlashCommandsHelp, registerSlashCommand,
 };
@@ -5066,6 +5067,7 @@ async function deleteMessagesByNameCallback(_, name) {
         return;
     }
 
+    poisonChatSaveLedger('slash-delete-messages');
     for (const message of messagesToDelete) {
         const index = chat.indexOf(message);
         if (index !== -1) {
@@ -6000,6 +6002,7 @@ export async function sendMessageAs(args, text) {
     chat_metadata.tainted = true;
 
     if (!isNaN(insertAt) && insertAt >= 0 && insertAt <= chat.length) {
+        poisonChatSaveLedger('slash-message-insert');
         chat.splice(insertAt, 0, message);
         await saveChatConditional();
         await eventSource.emit(event_types.MESSAGE_RECEIVED, insertAt, 'command');
@@ -6007,6 +6010,7 @@ export async function sendMessageAs(args, text) {
         await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, insertAt, 'command');
     } else {
         chat.push(message);
+        recordChatAppend(chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_RECEIVED, (chat.length - 1), 'command');
         addOneMessage(message);
         await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, (chat.length - 1), 'command');

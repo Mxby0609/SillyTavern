@@ -30,6 +30,7 @@ import {
     chatElement,
 } from '../script.js';
 import { selected_group } from './group-chats.js';
+import { recordChatTouch } from './chat-save-ledger.js';
 import { power_user } from './power-user.js';
 import {
     extractTextFromHTML,
@@ -155,6 +156,7 @@ export async function hideChatMessageRange(start, end, unhide, nameFitler = null
         if (nameFitler && message.name !== nameFitler) continue;
 
         message.is_system = hide;
+        recordChatTouch(messageId);
 
         // Also toggle "hidden" state for all visible messages
         const messageBlock = $(`.mes[mesid="${messageId}"]`);
