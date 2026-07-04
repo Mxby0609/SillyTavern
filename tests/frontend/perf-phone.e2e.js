@@ -285,6 +285,17 @@ test.describe('Phone-emulation performance', () => {
         // Measured verdict: the delta is negligible — scroll-to-bottom is
         // REFUTED as the primary streaming cost; saturation comes from the
         // per-tick DOM replacement itself (parse/style/layout/GC).
+        // Re-arm the delta ledger first (the itemized plus-one scenarios
+        // save through the poisoning context wrapper) so the stop scenarios
+        // measure their real delta-save path.
+        await page.evaluate(async () => {
+            const { saveChat } = await import('/script.js');
+            const { poisonChatSaveLedger } = await import('/scripts/chat-save-ledger.js');
+            poisonChatSaveLedger('perf-rearm-before-streaming');
+            await saveChat();
+        });
+        await page.waitForTimeout(SETTLE_MS);
+
         const withScroll = await runStreamingScenario(page);
         results['streaming-run-4s'] = withScroll.run;
         results['streaming-stop'] = withScroll.stop;
