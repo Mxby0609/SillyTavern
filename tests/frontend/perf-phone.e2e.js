@@ -253,6 +253,18 @@ test.describe('Phone-emulation performance', () => {
             });
             await page.waitForTimeout(SETTLE_MS);
             results[`save-chat-itemized-${entryCount}-clean`] = await collectMeters(page, wallMs);
+
+            // The real per-generation shape: ONE new entry on top of the
+            // existing set (legacy rewrote ALL of them; shards write one).
+            await resetMeters(page);
+            wallMs = await timeEvaluate(page, async (count) => {
+                const { upsertItemizedPrompt } = await import('/scripts/itemized-prompts.js');
+                const heavy = 'X'.repeat(1200000);
+                upsertItemizedPrompt({ mesId: 900000 + count, rawPrompt: heavy, charDescription: 'one more' });
+                await globalThis.SillyTavern.getContext().saveChat();
+            }, entryCount);
+            await waitForMeasure(page, 'itemized-save', MEASURE_TIMEOUT_MS);
+            results[`save-chat-itemized-${entryCount}-plus-one`] = await collectMeters(page, wallMs);
         }
 
         // Drop the synthetic itemized entries from memory and storage.

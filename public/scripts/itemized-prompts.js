@@ -8,93 +8,233 @@ import { isMobile } from './RossAscends-mods.js';
 import { renderTemplateAsync } from './templates.js';
 import { getFriendlyTokenizerName, getTokenCountAsync } from './tokenizers.js';
 import { perfMark, perfMeasure } from './perf-metrics.js';
-import { copyText } from './utils.js';
+import { copyText, uuidv4 } from './utils.js';
 
 let PromptArrayItemForRawPromptDisplay;
 let priorPromptArrayItemForRawPromptDisplay;
 
 const promptStorage = localforage.createInstance({ name: 'SillyTavern_Prompts' });
+
+/**
+ * Sharded storage layout (unit R3.4). Entries are MB-scale at long
+ * contexts (each carries the full raw prompt), and the legacy layout —
+ * ONE key holding the whole array — meant every generation rewrote every
+ * entry ever made, and every chat open loaded all of them into memory.
+ *
+ * Now each entry lives under its own key, addressed by a STABLE internal
+ * id, with a tiny per-chat index mapping display mesIds to ids:
+ * - index key: `\${chatId}\u0000idx` -> [{ id, mesId, hasRawPrompt }]
+ * - entry key: `${chatId}(NUL)ent(NUL)${id}` -> the entry object
+ * (NUL separators cannot appear in chat file names, so new keys can never
+ * collide with legacy array keys.)
+ *
+ * Message deletes/moves shift mesIds; because entry keys are id-based,
+ * those operations rewrite only the index, never the entry bodies. The
+ * index is the AUTHORITY for an entry's mesId: hydration stamps the
+ * index's mesId onto the loaded body.
+ *
+ * In memory the exported `itemizedPrompts` array holds hydrated entries
+ * or lightweight stubs ({ mesId, rawPrompt: boolean-ish flag }). The
+ * itemization popup hydrates the requested entry plus its nearest prior
+ * raw-prompt entry on demand. A one-time migration converts a legacy
+ * array key into shards on first load.
+ */
+
 export let itemizedPrompts = [];
 
-/**
- * Whether the in-memory array diverged from what was last written to
- * storage. saveItemizedPrompts persists the WHOLE array on every chat
- * save; with the flag, unchanged arrays (swipe taps, metadata saves) skip
- * the rewrite entirely. Claimed false BEFORE the write starts so a
- * mutation landing while a write is in flight keeps the array dirty for
- * the next save; restored to true when a write fails.
- *
- * The flag describes the array's relation to ITS OWN chat's storage key
- * (loadedChatId). Bookmarks/branches reuse saveItemizedPrompts with a
- * DIFFERENT chatId to copy the array under a new key — those copies
- * always write and never touch the flag.
- */
-let itemizedPromptsDirty = false;
+const INDEX_SUFFIX = '\u0000idx';
+const ENTRY_INFIX = '\u0000ent\u0000';
+const STUB_FLAG = '__itemizedPromptStub';
 
-/** @type {string|null} Chat id the in-memory array was loaded for. */
+/** @type {{id: string, mesId: number, hasRawPrompt: boolean}[]} */
+let promptIndex = [];
+/** @type {Map<string, object>} id -> hydrated entry */
+let hydratedEntries = new Map();
+/** @type {Set<string>} entry ids changed since the last successful write */
+let dirtyEntryIds = new Set();
+/** @type {Set<string>} entry ids removed since the last successful write */
+let deletedEntryIds = new Set();
+/** Whether the index diverged from storage since the last write. */
+let indexDirty = false;
+/** @type {string|null} Chat id the in-memory state was loaded for. */
 let loadedChatId = null;
+/** Serializes own-chat save writes (callers fire saveItemizedPrompts without awaiting). */
+let ownSaveChain = Promise.resolve();
+
+const indexKey = (chatId) => `${chatId}${INDEX_SUFFIX}`;
+const entryKey = (chatId, id) => `${chatId}${ENTRY_INFIX}${id}`;
 
 /**
- * Marks the itemized prompts as changed since the last successful write.
- * Internal: every mutating function in this module calls it; external
- * writers go through upsertItemizedPrompt so mutation and marking stay
- * atomic in one place.
+ * Rebuilds the exported array view from the index: hydrated entries where
+ * available, stubs elsewhere. Stub rawPrompt mirrors hasRawPrompt so
+ * existing truthiness checks (prior-prompt detection, context consumers)
+ * keep working without loading the bodies.
  */
-function markItemizedPromptsDirty() {
-    itemizedPromptsDirty = true;
+function rebuildArrayView() {
+    itemizedPrompts.length = 0;
+    for (const meta of promptIndex) {
+        const hydrated = hydratedEntries.get(meta.id);
+        if (hydrated) {
+            hydrated.mesId = meta.mesId;
+            itemizedPrompts.push(hydrated);
+        } else {
+            itemizedPrompts.push({ mesId: meta.mesId, rawPrompt: meta.hasRawPrompt ? true : undefined, [STUB_FLAG]: true });
+        }
+    }
 }
 
 /**
- * Inserts or replaces the itemized prompt for a message and marks the
- * store dirty — the single entry point for generation-time recording.
+ * Loads one entry body into memory (no-op if already hydrated or unknown).
+ * @param {string} chatId Chat the entry belongs to
+ * @param {string} id Entry id
+ * @returns {Promise<object|null>} The hydrated entry
+ */
+async function hydrateEntry(chatId, id) {
+    const meta = promptIndex.find(x => x.id === id);
+    if (!meta) {
+        return null;
+    }
+    if (hydratedEntries.has(id)) {
+        return hydratedEntries.get(id) ?? null;
+    }
+    const body = await promptStorage.getItem(entryKey(chatId, id));
+    if (body === null || typeof body !== 'object') {
+        return null;
+    }
+    // rebuildArrayView stamps the index's authoritative mesId onto every
+    // hydrated body — no separate stamp needed here.
+    hydratedEntries.set(id, body);
+    rebuildArrayView();
+    return body;
+}
+
+/**
+ * Hydrates the entry for a message plus its nearest PRIOR raw-prompt
+ * entry (the popup's diff needs both).
+ * @param {number} mesId Message id being itemized
+ * @returns {Promise<void>}
+ */
+async function hydrateForItemization(mesId) {
+    if (!loadedChatId) {
+        return;
+    }
+    let targetPosition = -1;
+    for (let i = 0; i < promptIndex.length; i++) {
+        if (promptIndex[i].mesId === mesId) {
+            targetPosition = i;
+            break;
+        }
+    }
+    if (targetPosition === -1) {
+        return;
+    }
+    await hydrateEntry(loadedChatId, promptIndex[targetPosition].id);
+    for (let i = targetPosition - 1; i >= 0; i--) {
+        if (promptIndex[i].hasRawPrompt) {
+            await hydrateEntry(loadedChatId, promptIndex[i].id);
+            break;
+        }
+    }
+}
+
+/**
+ * Inserts or replaces the itemized prompt for a message — the single
+ * entry point for generation-time recording. Only THIS entry is written
+ * on the next save.
  * @param {object} entry Itemized prompt entry (keyed by entry.mesId)
  */
 export function upsertItemizedPrompt(entry) {
-    const index = itemizedPrompts.findIndex((item) => item.mesId === entry.mesId);
-
-    if (index !== -1) {
-        itemizedPrompts[index] = entry;
+    const meta = promptIndex.find(x => x.mesId === entry.mesId);
+    if (meta) {
+        hydratedEntries.set(meta.id, entry);
+        dirtyEntryIds.add(meta.id);
+        const hasRawPrompt = Boolean(entry.rawPrompt);
+        if (meta.hasRawPrompt !== hasRawPrompt) {
+            meta.hasRawPrompt = hasRawPrompt;
+            indexDirty = true;
+        }
     } else {
-        itemizedPrompts.push(entry);
+        const id = uuidv4();
+        promptIndex.push({ id, mesId: entry.mesId, hasRawPrompt: Boolean(entry.rawPrompt) });
+        hydratedEntries.set(id, entry);
+        dirtyEntryIds.add(id);
+        deletedEntryIds.delete(id);
+        indexDirty = true;
     }
-
-    markItemizedPromptsDirty();
+    rebuildArrayView();
 }
 
 /**
- * Gets the itemized prompts for a chat.
+ * Gets the itemized prompts for a chat, migrating a legacy whole-array
+ * key into shards on first encounter.
  * @param {string} chatId Chat ID to load
  */
 export async function loadItemizedPrompts(chatId) {
     try {
         if (!chatId) {
-            itemizedPrompts = [];
-            itemizedPromptsDirty = false;
-            loadedChatId = null;
+            unloadItemizedPrompts();
             return;
         }
 
-        itemizedPrompts = await promptStorage.getItem(chatId);
+        promptIndex = [];
+        hydratedEntries = new Map();
+        dirtyEntryIds = new Set();
+        deletedEntryIds = new Set();
+        indexDirty = false;
+        loadedChatId = chatId;
 
-        if (!itemizedPrompts) {
-            itemizedPrompts = [];
+        const storedIndex = await promptStorage.getItem(indexKey(chatId));
+        if (Array.isArray(storedIndex)) {
+            promptIndex = storedIndex.filter(x => x && typeof x.id === 'string');
+        } else {
+            // Legacy layout: one key holding the whole array. Migrate.
+            const legacyArray = await promptStorage.getItem(chatId);
+            if (Array.isArray(legacyArray) && legacyArray.length) {
+                for (const entry of legacyArray) {
+                    const id = uuidv4();
+                    promptIndex.push({ id, mesId: entry.mesId, hasRawPrompt: Boolean(entry.rawPrompt) });
+                    hydratedEntries.set(id, entry);
+                    await promptStorage.setItem(entryKey(chatId, id), entry);
+                }
+                await promptStorage.setItem(indexKey(chatId), promptIndex);
+                await promptStorage.removeItem(chatId);
+                console.info(`Migrated ${legacyArray.length} itemized prompts of "${chatId}" to sharded storage.`);
+            }
         }
 
-        // Fresh from storage: memory and storage agree.
-        itemizedPromptsDirty = false;
-        loadedChatId = chatId;
-
+        rebuildArrayView();
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_LOADED, { chatId: chatId });
-    } catch {
-        console.log('Error loading itemized prompts for chat', chatId);
-        itemizedPrompts = [];
-        itemizedPromptsDirty = false;
+    } catch (error) {
+        console.log('Error loading itemized prompts for chat', chatId, error);
+        promptIndex = [];
+        hydratedEntries = new Map();
+        dirtyEntryIds = new Set();
+        deletedEntryIds = new Set();
+        indexDirty = false;
         loadedChatId = chatId;
+        rebuildArrayView();
     }
 }
 
 /**
- * Saves the itemized prompts for a chat.
+ * Drops the in-memory state without touching storage (chat closed).
+ */
+export function unloadItemizedPrompts() {
+    promptIndex = [];
+    hydratedEntries = new Map();
+    dirtyEntryIds = new Set();
+    deletedEntryIds = new Set();
+    indexDirty = false;
+    loadedChatId = null;
+    rebuildArrayView();
+}
+
+/**
+ * Saves the itemized prompts for a chat. For the loaded chat this writes
+ * ONLY entries that changed since the last successful write (plus the
+ * tiny index when it moved); a save under a DIFFERENT chat id is a
+ * bookmark/branch COPY: it hydrates everything and writes a full shard
+ * set under the new keys, never touching the own chat's dirt.
  * @param {string} chatId Chat ID to save itemized prompts for
  */
 export async function saveItemizedPrompts(chatId) {
@@ -102,30 +242,85 @@ export async function saveItemizedPrompts(chatId) {
         return;
     }
 
-    // The dirty flag only describes the array's own chat. A save under a
-    // DIFFERENT key is a copy (bookmarks/branches): it always writes and
-    // must not claim or clear the flag.
     const isOwnChat = chatId === loadedChatId;
 
-    if (isOwnChat && !itemizedPromptsDirty) {
-        return;
-    }
-
-    if (isOwnChat) {
-        // Claim before the write: a mutation arriving while setItem is in
-        // flight re-marks dirty and the NEXT save writes it.
-        itemizedPromptsDirty = false;
-    }
-
     try {
-        perfMark('itemized-save:start');
-        await promptStorage.setItem(chatId, itemizedPrompts);
-        perfMeasure('itemized-save', 'itemized-save:start');
+        if (isOwnChat) {
+            if (!dirtyEntryIds.size && !deletedEntryIds.size && !indexDirty) {
+                return;
+            }
+            // Serialize own-chat saves: callers fire this without awaiting,
+            // so a second save must not interleave with (or be outrun by)
+            // the writes of the first.
+            const run = ownSaveChain.then(async () => {
+                if (!dirtyEntryIds.size && !deletedEntryIds.size && !indexDirty) {
+                    return false;
+                }
+                // Claim before the write: mutations landing while the writes
+                // are in flight re-mark and the NEXT save picks them up. The
+                // index is SNAPSHOTTED at claim time — writing the live
+                // array could persist references to entries whose bodies
+                // were added after this claim and are not written yet.
+                const claimedDirty = dirtyEntryIds;
+                const claimedDeleted = deletedEntryIds;
+                const claimedIndex = indexDirty ? promptIndex.map(meta => ({ ...meta })) : null;
+                // Bodies are snapshotted at claim time too: a mid-flight
+                // DELETE drops an entry from the live map, and reading live
+                // during the awaited writes could skip a body the claimed
+                // index still references (an orphan until the next save).
+                const claimedEntries = new Map();
+                for (const id of claimedDirty) {
+                    const entry = hydratedEntries.get(id);
+                    if (entry) {
+                        claimedEntries.set(id, entry);
+                    }
+                }
+                dirtyEntryIds = new Set();
+                deletedEntryIds = new Set();
+                indexDirty = false;
+                try {
+                    perfMark('itemized-save:start');
+                    for (const [id, entry] of claimedEntries) {
+                        await promptStorage.setItem(entryKey(chatId, id), entry);
+                    }
+                    for (const id of claimedDeleted) {
+                        await promptStorage.removeItem(entryKey(chatId, id));
+                    }
+                    if (claimedIndex !== null) {
+                        await promptStorage.setItem(indexKey(chatId), claimedIndex);
+                    }
+                    perfMeasure('itemized-save', 'itemized-save:start');
+                    return true;
+                } catch (error) {
+                    // Restore the claim so nothing is lost for the next save.
+                    for (const id of claimedDirty) dirtyEntryIds.add(id);
+                    for (const id of claimedDeleted) deletedEntryIds.add(id);
+                    indexDirty = indexDirty || claimedIndex !== null;
+                    throw error;
+                }
+            });
+            ownSaveChain = run.catch(() => { });
+            const wrote = await run;
+            if (!wrote) {
+                return;
+            }
+        } else {
+            // Bookmark/branch copy: full shard set under the new chat id.
+            perfMark('itemized-save:start');
+            const copyIndex = [];
+            for (const meta of promptIndex) {
+                const entry = loadedChatId ? await hydrateEntry(loadedChatId, meta.id) : hydratedEntries.get(meta.id);
+                if (!entry) {
+                    continue;
+                }
+                copyIndex.push({ ...meta });
+                await promptStorage.setItem(entryKey(chatId, meta.id), entry);
+            }
+            await promptStorage.setItem(indexKey(chatId), copyIndex);
+            perfMeasure('itemized-save', 'itemized-save:start');
+        }
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_SAVED, { chatId: chatId });
     } catch {
-        if (isOwnChat) {
-            itemizedPromptsDirty = true;
-        }
         console.log('Error saving itemized prompts for chat', chatId);
     }
 }
@@ -137,22 +332,27 @@ export async function saveItemizedPrompts(chatId) {
  * @returns
  */
 export async function replaceItemizedPromptText(mesId, promptText) {
-    if (!Array.isArray(itemizedPrompts)) {
-        itemizedPrompts = [];
-    }
-
-    const itemizedPrompt = itemizedPrompts.find(x => x.mesId === mesId);
-
-    if (!itemizedPrompt) {
+    const meta = promptIndex.find(x => x.mesId === mesId);
+    if (!meta || !loadedChatId) {
         return;
     }
 
-    itemizedPrompt.rawPrompt = promptText;
-    markItemizedPromptsDirty();
+    const entry = await hydrateEntry(loadedChatId, meta.id);
+    if (!entry) {
+        return;
+    }
+
+    entry.rawPrompt = promptText;
+    dirtyEntryIds.add(meta.id);
+    const hasRawPrompt = Boolean(promptText);
+    if (meta.hasRawPrompt !== hasRawPrompt) {
+        meta.hasRawPrompt = hasRawPrompt;
+        indexDirty = true;
+    }
 }
 
 /**
- * Deletes the itemized prompts for a chat.
+ * Deletes the itemized prompts for a chat (all shards + any legacy key).
  * @param {string} chatId Chat ID to delete itemized prompts for
  */
 export async function deleteItemizedPrompts(chatId) {
@@ -161,7 +361,23 @@ export async function deleteItemizedPrompts(chatId) {
             return;
         }
 
+        const storedIndex = chatId === loadedChatId
+            ? promptIndex
+            : await promptStorage.getItem(indexKey(chatId));
+        if (Array.isArray(storedIndex)) {
+            for (const meta of storedIndex) {
+                if (meta && typeof meta.id === 'string') {
+                    await promptStorage.removeItem(entryKey(chatId, meta.id));
+                }
+            }
+        }
+        await promptStorage.removeItem(indexKey(chatId));
         await promptStorage.removeItem(chatId);
+
+        if (chatId === loadedChatId) {
+            unloadItemizedPrompts();
+            loadedChatId = chatId;
+        }
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_DELETED, { chatId: chatId, all: false });
     } catch {
         console.log('Error deleting itemized prompts for chat', chatId);
@@ -169,14 +385,12 @@ export async function deleteItemizedPrompts(chatId) {
 }
 
 /**
- * Empties the itemized prompts array and caches.
+ * Empties the itemized prompts store and caches.
  */
 export async function clearItemizedPrompts() {
     try {
         await promptStorage.clear();
-        itemizedPrompts = [];
-        // Memory and storage agree again (both empty).
-        itemizedPromptsDirty = false;
+        unloadItemizedPrompts();
         await eventSource.emit(event_types.ITEMIZED_PROMPTS_DELETED, { all: true });
     } catch {
         console.log('Error clearing itemized prompts');
@@ -326,6 +540,11 @@ export async function promptItemize(itemizedPrompts, requestedMesId) {
     console.log('PROMPT ITEMIZE ENTERED');
     var incomingMesId = Number(requestedMesId);
     console.debug(`looking for MesId ${incomingMesId}`);
+
+    // Shards: pull the requested entry (and its diff-prior) into memory
+    // before anything reads entry fields.
+    await hydrateForItemization(incomingMesId);
+
     var thisPromptSet = findItemizedPromptSet(itemizedPrompts, incomingMesId);
 
     if (thisPromptSet === undefined) {
@@ -435,53 +654,56 @@ export function initItemizedPrompts() {
 }
 
 /**
- * Swaps the itemized prompts between two messages. Useful when moving messages around in the chat.
+ * Swaps the itemized prompts between two messages. Useful when moving
+ * messages around in the chat. Entry keys are id-based, so this only
+ * touches the index.
  * @param {number} sourceMessageId Source message ID
  * @param {number} targetMessageId Target message ID
  */
 export function swapItemizedPrompts(sourceMessageId, targetMessageId) {
-    if (!Array.isArray(itemizedPrompts)) {
-        return;
+    let moved = false;
+    for (const meta of promptIndex) {
+        if (meta.mesId === sourceMessageId) {
+            meta.mesId = targetMessageId;
+            moved = true;
+        } else if (meta.mesId === targetMessageId) {
+            meta.mesId = sourceMessageId;
+            moved = true;
+        }
     }
 
-    const sourcePrompts = itemizedPrompts.filter(x => x.mesId === sourceMessageId);
-    const targetPrompts = itemizedPrompts.filter(x => x.mesId === targetMessageId);
-
-    sourcePrompts.forEach(prompt => {
-        prompt.mesId = targetMessageId;
-    });
-
-    targetPrompts.forEach(prompt => {
-        prompt.mesId = sourceMessageId;
-    });
-
-    itemizedPrompts.sort((a, b) => a.mesId - b.mesId);
-
-    if (sourcePrompts.length || targetPrompts.length) {
-        markItemizedPromptsDirty();
+    if (moved) {
+        promptIndex.sort((a, b) => a.mesId - b.mesId);
+        indexDirty = true;
+        rebuildArrayView();
     }
 }
 
 /**
  * Deletes the itemized prompt for a specific message.
- * Shifts down other itemized prompts as necessary.
+ * Shifts down other itemized prompts as necessary — an index-only
+ * operation; entry bodies are removed by id on the next save.
  * @param {number} messageId Message ID to delete itemized prompt for
  */
 export function deleteItemizedPromptForMessage(messageId) {
-    if (!Array.isArray(itemizedPrompts)) {
-        return;
+    const sizeBefore = promptIndex.length;
+    const removed = promptIndex.filter(x => x.mesId === messageId);
+    promptIndex = promptIndex.filter(x => x.mesId !== messageId);
+
+    for (const meta of removed) {
+        deletedEntryIds.add(meta.id);
+        dirtyEntryIds.delete(meta.id);
+        hydratedEntries.delete(meta.id);
     }
 
-    const sizeBefore = itemizedPrompts.length;
-    itemizedPrompts = itemizedPrompts.filter(x => x.mesId !== messageId);
-
     let shifted = false;
-    for (const prompt of itemizedPrompts.filter(x => x.mesId > messageId)) {
-        prompt.mesId -= 1;
+    for (const meta of promptIndex.filter(x => x.mesId > messageId)) {
+        meta.mesId -= 1;
         shifted = true;
     }
 
-    if (shifted || itemizedPrompts.length !== sizeBefore) {
-        markItemizedPromptsDirty();
+    if (shifted || promptIndex.length !== sizeBefore) {
+        indexDirty = true;
+        rebuildArrayView();
     }
 }
