@@ -282,6 +282,17 @@ test.describe('Itemized prompts sharded storage', () => {
                 itemized.upsertItemizedPrompt({ mesId: 990402, rawPrompt: 'second (mid-flight)' });
                 await saveA;
 
+                // Check variant A's invariant BEFORE anything else can
+                // repair it: reload and scan.
+                await itemized.loadItemizedPrompts(chatId);
+                const indexA = await store.getItem(chatId + INDEX_SUFFIX) ?? [];
+                out.orphanIdsA = [];
+                for (const meta of indexA) {
+                    const body = await store.getItem(chatId + ENTRY_INFIX + meta.id);
+                    if (!body) out.orphanIdsA.push(meta.mesId);
+                }
+                out.hasFirst = indexA.some(x => x.mesId === 990401);
+
                 // Variant: TWO claimed entries, and the LATER one is
                 // deleted while the save is between its body writes — the
                 // claimed index still references it, so its body snapshot
@@ -293,16 +304,14 @@ test.describe('Itemized prompts sharded storage', () => {
                 itemized.deleteItemizedPromptForMessage(990404);
                 await saveB;
 
-                // Reload from storage WITHOUT a repair save: whatever the
-                // index lists must have a body.
+                // Variant B's invariant, again before any repair.
                 await itemized.loadItemizedPrompts(chatId);
-                const index = await store.getItem(chatId + INDEX_SUFFIX) ?? [];
-                out.orphanIds = [];
-                for (const meta of index) {
+                const indexB = await store.getItem(chatId + INDEX_SUFFIX) ?? [];
+                out.orphanIdsB = [];
+                for (const meta of indexB) {
                     const body = await store.getItem(chatId + ENTRY_INFIX + meta.id);
-                    if (!body) out.orphanIds.push(meta.mesId);
+                    if (!body) out.orphanIdsB.push(meta.mesId);
                 }
-                out.hasFirst = index.some(x => x.mesId === 990401);
             } finally {
                 // Clean both probes (and any stray body) then persist.
                 const index = await store.getItem(chatId + INDEX_SUFFIX) ?? [];
@@ -317,7 +326,8 @@ test.describe('Itemized prompts sharded storage', () => {
             return out;
         }, { INDEX_SUFFIX, ENTRY_INFIX });
 
-        expect(results.orphanIds, 'no index entry points at a missing body').toEqual([]);
+        expect(results.orphanIdsA, 'no orphan after the mid-flight upsert').toEqual([]);
+        expect(results.orphanIdsB, 'no orphan after the mid-flight delete').toEqual([]);
         expect(results.hasFirst, 'the claimed entry landed').toBe(true);
     });
 
